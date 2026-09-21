@@ -10,11 +10,11 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use serde::Serialize;
 use loadloom_core::{
     CoreError, EngineLimits, ErrorCount, HistoryPoint, LiveConfigPatch, LogEntry, LogLevel,
     MetricsSnapshot, RunEvent, RunEventKind, RunPhase, StartRunRequest,
 };
+use serde::Serialize;
 
 // ---------------------------------------------------------------------------
 // bindings.ts 解析器
