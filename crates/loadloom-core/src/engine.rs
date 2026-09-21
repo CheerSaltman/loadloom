@@ -125,7 +125,6 @@ fn classify(error: &reqwest::Error) -> String {
 struct Control {
     stop: AtomicBool,
     threads: AtomicU32,
-    rate_bps: AtomicU64,
 }
 
 struct Inner {
@@ -407,9 +406,6 @@ impl Engine {
             self.metrics.reset();
             self.control.stop.store(false, Ordering::Release);
             self.control.threads.store(threads, Ordering::Release);
-            self.control
-                .rate_bps
-                .store(mib_to_bps(rate_mib) as u64, Ordering::Release);
             self.limiter.set_rate(mib_to_bps(rate_mib));
 
             inner.running = true;
@@ -486,7 +482,6 @@ impl Engine {
             let value = value.clamp(0.0, MAX_RATE_MIB);
             inner.rate_mib = value;
             let bps = mib_to_bps(value);
-            self.control.rate_bps.store(bps as u64, Ordering::Release);
             self.limiter.set_rate(bps);
         }
         if inner.running {

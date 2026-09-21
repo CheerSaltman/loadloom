@@ -61,7 +61,11 @@ impl RateLimiter {
             .store(bucket.rate.to_bits(), Ordering::Release);
     }
 
-    /// 消费指定字节数的令牌，必要时异步等待（不阻塞线程）。
+    /// 预订指定字节数的令牌，必要时异步等待（不阻塞线程）。
+    ///
+    /// `tokens` 可以暂时为负数，代表已经为其它 worker 预订、但尚未到账的
+    /// 令牌。这样单个响应块大于桶容量时仍能在一次等待后完成；如果每次等待
+    /// 都把余额清零，超过容量的块将永远拿不到足够令牌而陷入循环。
     pub(crate) async fn acquire(&self, bytes: usize) {
         // ---- 快路径：不限速时直接返回，完全不加锁 ----
         //
@@ -74,22 +78,18 @@ impl RateLimiter {
         if f64::from_bits(self.rate_bits.load(Ordering::Acquire)) <= 0.0 {
             return;
         }
-        loop {
-            let wait = {
-                let mut bucket = self.inner.lock().unwrap_or_else(|error| error.into_inner());
-                bucket.refill();
-                if bucket.rate <= 0.0 {
-                    return;
-                }
-                let need = bytes as f64;
-                if bucket.tokens >= need {
-                    bucket.tokens -= need;
-                    return;
-                }
-                let deficit = need - bucket.tokens;
-                bucket.tokens = 0.0;
-                Duration::from_secs_f64(deficit / bucket.rate)
-            };
+        let wait = {
+            let mut bucket = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+            bucket.refill();
+            if bucket.rate <= 0.0 {
+                return;
+            }
+
+            let deficit = (bytes as f64 - bucket.tokens).max(0.0);
+            bucket.tokens -= bytes as f64;
+            Duration::from_secs_f64(deficit / bucket.rate)
+        };
+        if !wait.is_zero() {
             tokio::time::sleep(wait.max(Duration::from_micros(200))).await;
         }
     }
@@ -142,5 +142,17 @@ mod tests {
         assert!((capacity(&limiter) - 500_000.0).abs() < 1.0);
         limiter.set_rate(1.0);
         assert!((capacity(&limiter) - 128.0 * 1024.0).abs() < 1.0);
+    }
+
+    #[tokio::test]
+    async fn a_chunk_larger_than_capacity_is_scheduled_once() {
+        let limiter = RateLimiter::new();
+        limiter.set_rate(1_000_000.0);
+
+        // 1 MB/s 时桶容量为 128 KiB。本请求的块更大，旧实现会在每轮等待
+        // 后重新把余额置零，因而永远不能通过容量检查。
+        let result =
+            tokio::time::timeout(Duration::from_secs(1), limiter.acquire(256 * 1024)).await;
+        assert!(result.is_ok(), "大于桶容量的响应块不应永久等待");
     }
 }
