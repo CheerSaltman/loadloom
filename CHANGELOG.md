@@ -3,7 +3,19 @@
 本文件格式遵循 [Keep a Changelog 1.1.0](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本 2.0.0](https://semver.org/lang/zh-CN/)。
 
-## [未发布]
+## [0.4.0] - 2026-09-22
+
+### 变更（破坏性）
+
+- 项目正式更名为 **LoadLoom**。旧名 Traffic Console 出现在安装标识、日志路径、IPC 事件名与
+  请求溯源参数里，因此这次改名是破坏性变更，需要重新安装（旧版本不会自动升级到新 bundle id）：
+  - crate `traffic-core` → `loadloom-core`；桌面包 `traffic-console-desktop` → `loadloom-desktop`
+  - bundle id `com.agentic.trafficconsole` → `com.agentic.loadloom`；产物名 `LoadLoom_<版本>_x64-setup.exe`
+  - 日志目录 `%LOCALAPPDATA%\TrafficConsole\logs` → `%LOCALAPPDATA%\LoadLoom\logs\loadloom.log`
+  - IPC 事件 `traffic://log` / `traffic://run-event` → `loadloom://log` / `loadloom://run-event`
+  - 请求溯源参数 `_tc=` → `_ll=`；User-Agent `loadloom/0.4 (+authorized-load-test)`
+  - npm 包名 `traffic-console` → `loadloom`；CSS 类前缀 `tc-` → `ll-`
+- 版本号 0.3.0 → 0.4.0（上述破坏性改名）。
 
 ### 新增
 
@@ -65,5 +77,5 @@
 - egui / eframe / webbrowser / axum 等一切历史 GUI 或本地服务遗留。
 - 界面上的技术标签（引擎/壳/推流说明），用户不关心这些内部细节。
 
-[未发布]: https://github.com/CheerSaltman/loadloom/compare/v0.3.0...HEAD
+[0.4.0]: https://github.com/CheerSaltman/loadloom/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/CheerSaltman/loadloom/releases/tag/v0.3.0
