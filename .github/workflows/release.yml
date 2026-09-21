@@ -54,8 +54,14 @@ jobs:
                  --title "LoadLoom $GITHUB_REF_NAME" \
                  --notes "本次变更见 CHANGELOG.md。"
 
+          # Portable build: cargo emits target/release/loadloom-desktop.exe, but on the
+          # release page every asset follows the same LoadLoom_<version>_x64-* scheme.
+          # The local build artifact keeps its original name.
+          cp "target/release/loadloom-desktop.exe" \
+             "target/release/LoadLoom_${VERSION}_x64-portable.exe"
+
           gh release upload "$GITHUB_REF_NAME" \
-            "target/release/loadloom-desktop.exe" \
+            "target/release/LoadLoom_${VERSION}_x64-portable.exe" \
             "target/release/bundle/nsis/LoadLoom_${VERSION}_x64-setup.exe" \
             "target/release/bundle/msi/LoadLoom_${VERSION}_x64_en-US.msi" \
             --clobber

@@ -65,7 +65,7 @@ Grab one of the three assets from [Releases](https://github.com/CheerSaltman/loa
 | --- | --- |
 | `LoadLoom_0.4.0_x64-setup.exe` | **Most users.** NSIS installer with a Start Menu entry and an uninstaller |
 | `LoadLoom_0.4.0_x64_en-US.msi` | Enterprise deployment via Group Policy or silent install (`msiexec /i`) |
-| `loadloom-desktop.exe` | Portable, no installation — just double-click |
+| `LoadLoom_0.4.0_x64-portable.exe` | Portable, no installation — just double-click |
 
 > Requirements: Windows 10/11 x64 plus the **WebView2 Runtime** (bundled with Windows 11 and recent Windows 10 builds; if it is missing, install the [Evergreen Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) once).
 
@@ -79,7 +79,7 @@ See [Building from source](#building-from-source).
 
 ### 1. Launch
 
-Open **LoadLoom** from the Start Menu, or double-click `loadloom-desktop.exe`.
+Open **LoadLoom** from the Start Menu, or double-click `LoadLoom_0.4.0_x64-portable.exe`.
 On first launch it creates its log directory: `%LOCALAPPDATA%\LoadLoom\logs\loadloom.log`.
 
 ### 2. Confirm you are authorized

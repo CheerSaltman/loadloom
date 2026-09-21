@@ -11,6 +11,8 @@
   请求溯源参数里，因此这次改名是破坏性变更，需要重新安装（旧版本不会自动升级到新 bundle id）：
   - crate `traffic-core` → `loadloom-core`；桌面包 `traffic-console-desktop` → `loadloom-desktop`
   - bundle id `com.agentic.trafficconsole` → `com.agentic.loadloom`；产物名 `LoadLoom_<版本>_x64-setup.exe`
+  - Release 产物统一命名：`LoadLoom_<版本>_x64-setup.exe`（NSIS 安装包）、`LoadLoom_<版本>_x64_en-US.msi`（MSI）、
+    `LoadLoom_<版本>_x64-portable.exe`（免安装版；本地构建产物仍为 `target/release/loadloom-desktop.exe`，上传时改名）
   - 日志目录 `%LOCALAPPDATA%\TrafficConsole\logs` → `%LOCALAPPDATA%\LoadLoom\logs\loadloom.log`
   - IPC 事件 `traffic://log` / `traffic://run-event` → `loadloom://log` / `loadloom://run-event`
   - 请求溯源参数 `_tc=` → `_ll=`；User-Agent `loadloom/0.4 (+authorized-load-test)`
