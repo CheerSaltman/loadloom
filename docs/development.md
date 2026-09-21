@@ -1,6 +1,6 @@
 # 开发、验收与发布
 
-本文档面向**维护者**，包含本地开发环境、质量门禁、本机验收命令与发布步骤。
+本文档面向维护者，包含本地开发环境、质量门禁、本机验收命令与发布步骤。
 
 ## 开发环境
 
@@ -15,7 +15,7 @@
 
 ```bash
 npm install                                # 安装前端依赖
-npm run typecheck                          # tsc --noEmit，应零输出
+npm run typecheck                          # tsc --noEmit
 npm run build                              # 产出前端 dist/
 npm run desktop:dev                        # 开发模式：热重载原生窗口
 npm run desktop:build                      # 打包：exe + NSIS + MSI
@@ -30,7 +30,7 @@ cargo test  --locked -p loadloom-core                             # 18 个测试
 cargo run   --locked --example headless_smoke -p loadloom-core     # 示例可运行
 ```
 
-任何一步失败都**不要**进入下一步。CI（`.github/workflows/ci.yml`）会把同样的门禁再跑一遍。
+任何一步失败都不要进入下一步。CI（`.github/workflows/ci.yml`）会把同样的门禁再跑一遍。
 
 ## 测试构成
 
@@ -46,8 +46,8 @@ cargo run   --locked --example headless_smoke -p loadloom-core     # 示例可�
 cargo test --release -p loadloom-core --bench throughput -- --ignored --nocapture
 ```
 
-> **注意**：回环地址上的吞吐数字只能回答「引擎能不能跑起来、速率是否随并发上升」。
-> 它**不适合**用来给真实目标的吞吐下结论 —— 瓶颈通常落在测试机自身或回环协议栈上。
+> **注意**：回环地址上的吞吐数字只能回答「引擎能不能跑起来、速率是否随并发上升」，
+> 不适合用来给真实目标的吞吐下结论 —— 瓶颈通常落在测试机自身或回环协议栈上。
 
 ## 本机验收
 
@@ -67,12 +67,10 @@ scripts/make_icon.mjs           # 图标生成
    git tag -a v0.4.0 -m "LoadLoom v0.4.0"
    git push origin v0.4.0
    ```
-4. **推送 tag 后无需人工出包**：`.github/workflows/release.yml` 会在 tag 推送时自动跑质量门禁、
-   构建并上传三个产物到对应 Release。首次实际生效见仓库 Actions 页。
+4. 推送 tag 后无需人工出包：`.github/workflows/release.yml` 会在 tag 推送时自动跑质量门禁、
+   构建并上传三个产物到对应 Release。
 
-   > 手工兜底（CI 不可用时）：在本机执行 `npm run desktop:build`，再把下表产物上传到 Release。
-   >
-   > 下表为产物清单：
+   > 手工兜底（CI 不可用时）：在本机执行 `npm run desktop:build`，再按上表产物上传到 Release。
 
    | 产物 | 路径 |
    | --- | --- |
@@ -92,7 +90,7 @@ scripts/make_icon.mjs           # 图标生成
   received "../<真实目录名>/loadloom/index.html"
   ```
   原因是 Vite 会把路径解析回真实路径，再计算相对路径时多出 `..`，Rollup 直接拒绝。
-  **请始终在项目真实路径下构建**，联接仅可用于 `git` 等工具。
+  请始终在项目真实路径下构建，联接仅可用于 `git` 等工具。
 - **改动目录结构后需要 `cargo clean`。** `target/` 中会缓存绝对路径，移动项目目录后会看到
   形如「找不到 app_hide.toml」的构建脚本报错。
 - **PowerShell 执行策略。** 若策略禁止运行脚本，`npm.ps1` 会被拦截，改用 `npm.cmd`。

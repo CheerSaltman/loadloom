@@ -25,28 +25,25 @@ cargo bench --locked -p loadloom-core -- --ignored --nocapture
 
 提交前请确保 `cargo fmt --all` 与 `cargo clippy --all-targets` 无新增问题。
 
-## 三条硬性架构约束
+## 三条架构约束
 
-改动前请先读 `docs/architecture.md`。以下三条**不接受**例外：
+改动前请先读 `docs/architecture.md`。
 
-1. **`loadloom-core` 里不许出现任何 GUI / 窗口 / 浏览器依赖。**
-   它是无头业务核心，要能在 CI 里跑、能在没有桌面环境的机器上跑。
-   新增依赖请先自问：它会把 `windows` / `webview` / `eframe` 拖进来吗？
+1. **`loadloom-core` 中不得出现任何 GUI / 窗口 / 浏览器依赖。**
+   它是无头业务核心，需能在 CI 和无桌面环境的机器上运行。
+   新增依赖前请确认不会引入 `windows` / `webview` / `eframe` 等。
 2. **长耗时的数据流一律用异步推送，禁止轮询。**
    高频指标走 `tauri::ipc::Channel`，低频事件走 `app.emit`；
-   前端不许用 `setInterval` 去拉状态。
+   前端不使用 `setInterval` 拉状态。
 3. **契约改动必须三处同步**：`crates/loadloom-core/src/contract.rs`（单一事实来源）、
    `src/bindings.ts`（TS 镜像）、以及 `tests/contract_wire.rs`（机械护栏）。
-   护栏会解析 TS 源码逐字段比对；只改一边会让 CI 直接红。
+   护栏会解析 TS 源码逐字段比对，只改一边会让 CI 失败。
 
-## 测试纪律
+## 测试要求
 
-- **先写会失败的测试，再改代码。** 修 bug 时请附一个能复现该 bug 的回归测试；
-  如果这个测试在还原修复后**仍然通过**，说明它没锁住任何东西。
-- 项目实践过「变异测试」：手工把修复回退，确认新测试确实 FAILED，再改回来。
-  闪退修复、契约护栏都经过这步验证。
-- 涉及时序的测试请**轮询等待**（带明确截止时间），不要写死 `sleep(固定毫秒)`。
-  写死 sleep 的测试会在快机器上假通过、在慢机器上假失败。
+- 修 bug 时请附一个能复现该 bug 的回归测试；该测试应在还原修复后失败。
+- 涉及时序的测试请轮询等待（带明确的截止时间），不要写死 `sleep(固定毫秒)`，
+  否则会在快机器上假通过、慢机器上假失败。
 
 ## 提交信息
 

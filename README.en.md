@@ -9,19 +9,19 @@
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](rust-toolchain.toml)
 [![Tauri v2](https://img.shields.io/badge/Tauri-v2-24C8DB.svg)](https://tauri.app/)
 
-LoadLoom cleanly separates the generation of traffic from the user interface:
+LoadLoom is split into three layers:
 
-- **`loadloom-core`** — a pure Rust library with **zero GUI dependencies**. It needs no window, no browser and no event loop, so it compiles, tests and runs inside CI, containers and headless servers.
-- **`src-tauri`** — the native desktop shell (Tauri v2). It only bridges IPC; business logic lives elsewhere.
+- **`loadloom-core`** — a pure Rust library with zero GUI dependencies. It needs no window, no browser and no event loop, so it compiles, tests and runs inside CI, containers and headless servers.
+- **`src-tauri`** — the native desktop shell (Tauri v2). It only bridges IPC.
 - **`src`** — a React 19 frontend responsible for rendering and passing parameters down.
 
-The contract between them has a **single source of truth plus a mechanical guard**: if either side drifts, tests fail immediately.
+The contract between the two sides is defined in `contract.rs`; the frontend's `src/bindings.ts` is a hand-written mirror of it, checked field by field by a test.
 
 > ### ⚠️ Read this first: authorized targets only
 >
 > Use this tool **only** against systems you own or have explicit written authorization to test. Applying pressure to systems without permission may violate laws and terms of service.
 >
-> The app asks you to confirm authorization before traffic starts, and **refuses to start if it is not confirmed** (it returns a `rejected` event). Every request additionally carries a `_ll={worker_id}-{request_id}` parameter so the target's operators can identify and trace your traffic in their access logs.
+> The app asks you to confirm authorization before traffic starts, and refuses to start if it is not confirmed (it returns a `rejected` event). Every request carries a `_ll={worker_id}-{request_id}` parameter so the target's operators can identify and trace your traffic in their access logs.
 
 ---
 
@@ -44,13 +44,13 @@ The contract between them has a **single source of truth plus a mechanical guard
 | Capability | Description |
 | --- | --- |
 | **Headless core** | `loadloom-core`'s dependency closure contains no GUI or rendering library, and it runs real traffic in a windowless environment |
-| **Concurrency ramp** | 1–32 workers; **dragging the slider while a run is active takes effect immediately**, no restart needed |
+| **Concurrency ramp** | 1–32 workers; dragging the slider while a run is active takes effect immediately, no restart needed |
 | **Global rate limit** | Token bucket; `0` means unlimited, capped at 4096 MiB/s, adjustable mid-run |
 | **Auto-stop** | A byte threshold (GB) and a duration threshold (minutes) apply independently; `0` disables either one |
-| **Live streaming** | Metrics are pushed every 250 ms; **the frontend never polls** and drops out-of-order frames via a monotonic `seq` |
+| **Live streaming** | Metrics are pushed every 250 ms; the frontend never polls and drops out-of-order frames via a monotonic `seq` |
 | **Error classification** | Aggregated by code: `TIMEOUT` / `CONNECT_FAILED` / `BODY_STREAM` / `DECODE_ERROR` / `REDIRECT_ERROR` / `REQUEST_ERROR` / `UNKNOWN` |
-| **Crash forensics** | A panic hook writes both to the log file and to the in-app "Run log" page — crashes no longer vanish silently |
-| **Native window** | Tauri v2 with the system WebView2; **it listens on no ports** and spawns no browser process |
+| **Crash forensics** | A panic hook writes both to the log file and to the in-app "Run log" page |
+| **Native window** | Tauri v2 with the system WebView2; it listens on no ports and spawns no browser process |
 | **Tray resident** | The close button minimizes to the tray (it does not exit); quit from the tray menu |
 
 ---
@@ -84,7 +84,7 @@ On first launch it creates its log directory: `%LOCALAPPDATA%\LoadLoom\logs\load
 
 ### 2. Confirm you are authorized
 
-The UI has an **authorization checkbox**. It is not decorative:
+The UI has an authorization checkbox:
 
 - Not checked → pressing **Start** makes the engine return a `rejected` event and no request is ever sent.
 - Checked → every request carries `_ll={worker_id}-{request_id}`, so the target's operators can recognize you in their access logs.
@@ -107,13 +107,13 @@ Once you press **Start**:
 - The **line chart** keeps the last 120 samples; the full history arrives once in the handshake frame, then only deltas are pushed.
 - The **Run log** page shows engine logs and error details, mirrored to the log file on disk.
 
-While a run is active you can **change concurrency and rate limit on the fly** — no stop and restart.
+While a run is active you can change concurrency and rate limit on the fly.
 
 ### 5. Stop
 
-- A threshold is reached → auto stop (a `autoStopped` event is pushed).
+- A threshold is reached → auto stop (an `autoStopped` event is pushed).
 - You press **Stop** → a `stopped` event is pushed.
-- You click the window's close button → it **only minimizes to the tray**; traffic keeps running. To really quit, use **Quit** in the tray context menu.
+- You click the window's close button → it only minimizes to the tray; traffic keeps running. To really quit, use **Quit** in the tray context menu.
 
 ### 6. Troubleshooting
 
@@ -122,15 +122,15 @@ While a run is active you can **change concurrency and rate limit on the fly** �
 | Failures keep climbing | Error codes on the **Run log** page: `CONNECT_FAILED` is usually network/port/certificate, `TIMEOUT` usually means the target is saturated or packets are dropped |
 | Rate plateaus | Gains beyond 8 workers are typically small; first make sure the test machine or the target is not the bottleneck |
 | UI seems unresponsive | Check the tray icon — the window may be minimized while the process is alive |
-| The app exited unexpectedly | The log file will contain a panic record (guaranteed by the panic hook) |
+| The app exited unexpectedly | The log file contains a panic record (guaranteed by the panic hook) |
 
 ---
 
 ## Tutorial: use it as a library (headless)
 
-`loadloom-core` does not assume the calling thread has a Tokio runtime context. It captures a runtime handle at construction time (reusing an existing one, or creating its own), so you can **start traffic from any thread** — including a bare `main` thread with no runtime.
+`loadloom-core` captures a runtime handle at construction time (reusing an existing one, or creating its own), so you can start traffic from any thread — including a bare `main` thread with no runtime.
 
-The smallest runnable example ships with the repo:
+The smallest runnable example:
 
 ```bash
 cargo run --locked --example headless_smoke -p loadloom-core
@@ -143,9 +143,9 @@ cargo run --locked --example headless_smoke -p loadloom-core
 已停止，最终阶段=Idle
 ```
 
-That example lives in `examples/`, which means `cargo test` compiles it every time, so it **cannot rot**.
+The example lives in `examples/`, compiled by `cargo test`.
 
-Regression testing in CI, containers or headless servers is just as direct:
+Regression testing in CI, containers or headless servers:
 
 ```bash
 cargo test --locked -p loadloom-core     # 18 tests, no graphical environment required
@@ -174,16 +174,6 @@ cargo test --locked -p loadloom-core     # 18 tests, no graphical environment re
 └──────────────────────────────────────────────────────────┘
 ```
 
-**Why cut it this way?**
-
-1. **Testability.** Once a GUI leaks into the business layer, testing requires a window and an event loop. Today the core logic is `cargo test` in CI: 18 tests, seconds, no display, parallelizable. `headless_e2e.rs` can even run real traffic on a **bare thread with no Tokio runtime** — and that is exactly the regression test for the original crash bug.
-
-2. **Replaceability.** The shell and the frontend are disposable. Want a CLI, a web service, or a daemon on a server instead? Rewrite the shell — `loadloom-core` does not change by a single line.
-
-3. **Verifiable constraints.** Requirements like "no browser form factor" and "no GUI pollution" silently decay after a few iterations if they rely on human memory. Once layered, they become **assertions a machine can check**: the process listens on no ports (`scripts/verify_launch.ps1`), and the core dependency closure contains no GUI library (`scripts/audit_residue.ps1`).
-
-**How does the seam between layers stay intact?** This is the most distinctive part of the project. `contract.rs` is the **only** place the contract is defined, and the frontend's `bindings.ts` is a hand-written mirror of it (because `tauri-specta` has not shipped a stable release). To stop the two from drifting, `contract_wire.rs` **parses `bindings.ts` as source text**, extracts every interface's field names, and compares them field by field against the JSON serde actually produces. Get one field name wrong and the test tells you exactly which field differs.
-
 Responsibilities and dependency direction:
 
 | Layer | Responsibility | Must not do |
@@ -196,28 +186,9 @@ Responsibilities and dependency direction:
 
 ## How it works: three key designs
 
-<table>
-<tr><th>Design</th><th>Approach</th></tr>
-<tr>
-<td><b>Stream, do not poll</b></td>
-<td>Metrics travel through <code>tauri::ipc::Channel&lt;MetricsSnapshot&gt;</code> every 250 ms; logs and lifecycle use events.
-Each frame carries a monotonic <code>seq</code>, and the frontend drops out-of-order or duplicate frames. The handshake frame carries the full
-120-sample history, after which only the single <code>latest</code> point is pushed — re-sending 120 points every 250 ms would be pure waste.</td>
-</tr>
-<tr>
-<td><b>Single source of truth + mechanical guard</b></td>
-<td><code>contract.rs</code> on the Rust side is the only definition. The original plan was to generate TypeScript with
-<code>tauri-specta</code>, but it only ships <code>2.0.0-rc</code> releases, so we took the fallback path: a hand-written mirror in
-<code>src/bindings.ts</code>, guarded by the <code>contract_wire</code> test which <b>reads and parses bindings.ts</b> and compares it
-field by field against the JSON serde really produces. Rename a field incorrectly and you get a plain-language failure.</td>
-</tr>
-<tr>
-<td><b>Crashes must leave a trace</b></td>
-<td>The panic hook writes to the log file and to the in-app log stream. Release builds deliberately keep <code>panic = "unwind"</code>
-(rather than <code>abort</code>) and keep a <code>line-tables-only</code> line table, so a background-task panic is both captured and
-attributable to a source line instead of taking the whole process down without a word.</td>
-</tr>
-</table>
+- **Stream, do not poll**: metrics travel through `tauri::ipc::Channel<MetricsSnapshot>` every 250 ms; logs and lifecycle use events. Each frame carries a monotonic `seq`, and the frontend drops out-of-order or duplicate frames. The handshake frame carries the full 120-sample history, after which only the single `latest` point is pushed.
+- **Single source of truth + mechanical guard**: `contract.rs` is the only definition. `tauri-specta` only ships `2.0.0-rc` releases, so `src/bindings.ts` is a hand-written mirror, guarded by the `contract_wire` test, which reads and parses that file and compares it field by field against the JSON serde produces.
+- **Crashes must leave a trace**: the panic hook writes to the log file and to the in-app log stream. Release builds keep `panic = "unwind"` and a `line-tables-only` line table.
 
 A contract test failure looks like this:
 
@@ -238,7 +209,7 @@ git clone https://github.com/CheerSaltman/loadloom.git
 cd loadloom
 
 npm install
-npm run typecheck          # tsc --noEmit, should print nothing
+npm run typecheck          # tsc --noEmit
 npm run build              # emits the frontend into dist/
 
 cargo test --locked -p loadloom-core   # 18 tests, no graphical environment needed
@@ -271,7 +242,7 @@ loadloom/
 │   │   ├── contract_wire.rs      # contract guard: parses bindings.ts field by field
 │   │   └── headless_e2e.rs       # headless end-to-end: real traffic against a local fake origin
 │   ├── benches/throughput.rs     # benchmark entry (outside the test suite)
-│   └── examples/headless_smoke.rs# runnable example (compiled by cargo test, cannot rot)
+│   └── examples/headless_smoke.rs# runnable example (compiled by cargo test)
 ├── src-tauri/                    # native desktop shell
 │   ├── src/{lib,main,logging}.rs
 │   ├── capabilities/default.json
@@ -294,9 +265,9 @@ loadloom/
 
 | Document | Contents |
 | --- | --- |
-| [docs/architecture.md](docs/architecture.md) | Architectural decisions and their trade-offs (the story behind six key decisions) |
+| [docs/architecture.md](docs/architecture.md) | Architectural decisions and their trade-offs |
 | [docs/development.md](docs/development.md) | Development environment, quality gates, local acceptance and the release procedure |
-| [docs/conventions.md](docs/conventions.md) | Repository conventions, each traced back to official documentation |
+| [docs/conventions.md](docs/conventions.md) | Repository conventions traced back to official documentation |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to file issues and pull requests |
 | [SECURITY.md](SECURITY.md) | How to report a vulnerability |
 | [CHANGELOG.md](CHANGELOG.md) | Release history (Keep a Changelog format) |
