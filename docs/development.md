@@ -67,8 +67,12 @@ scripts/make_icon.mjs           # 图标生成
    git tag -a v0.3.0 -m "Traffic Console v0.3.0"
    git push origin v0.3.0
    ```
-4. 构建安装包：`npm run desktop:build`。
-5. 在 GitHub 上创建对应 Release，并上传三个产物：
+4. **推送 tag 后无需人工出包**：`.github/workflows/release.yml` 会在 tag 推送时自动跑质量门禁、
+   构建并上传三个产物到对应 Release。首次实际生效见仓库 Actions 页。
+
+   > 手工兜底（CI 不可用时）：在本机执行 `npm run desktop:build`，再把下表产物上传到 Release。
+   >
+   > 下表为产物清单：
 
    | 产物 | 路径 |
    | --- | --- |
