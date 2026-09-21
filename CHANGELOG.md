@@ -79,5 +79,5 @@
 - egui / eframe / webbrowser / axum 等一切历史 GUI 或本地服务遗留。
 - 界面上的技术标签（引擎/壳/推流说明），用户不关心这些内部细节。
 
-[0.4.0]: https://github.com/CheerSaltman/loadloom/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/CheerSaltman/loadloom/releases/tag/v0.3.0
+[0.4.0]: https://github.com/CheerSaltman/loadloom/compare/712308638d0c14afd44958e47f735c39b8dfb812...v0.4.0
+[0.3.0]: https://github.com/CheerSaltman/loadloom/commit/712308638d0c14afd44958e47f735c39b8dfb812
