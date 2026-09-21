@@ -1,0 +1,40 @@
+# 依赖自动更新：与 CI 配合，让「依赖漂移」变成可审阅的小 PR，而不是某天的意外。
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      # tokio / hyper / reqwest 这类网状依赖必须整组升级，否则版本冲突。
+      async-stack:
+        patterns: ["tokio*", "hyper*", "reqwest", "h2", "tower*"]
+
+  - package-ecosystem: cargo
+    directory: /src-tauri
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      tauri:
+        patterns: ["tauri*", "wry", "tao"]
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: "chore(ci)"

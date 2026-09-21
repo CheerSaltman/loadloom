@@ -1,0 +1,15 @@
+# 固定工具链：本地与 CI 用同一渠道，消灭「我这能编」。
+# 官方约定见 rustup Book 的 Toolchain Overrides：rust-toolchain.toml 会被 rustup 自动识别。
+#
+# 刻意写 "stable" 而不是某个具体版本号：
+#   1. CI（dtolnay/rust-toolchain@stable）用的就是 stable，两边天然对齐；
+#   2. 写死版本号会让 rustup 每次调用都去同步那个确切版本——如果它在本机是
+#      半安装状态，就会「同步 → 失败 → 回滚」，把噪音和延迟加到**每条** cargo 命令上。
+# 需要绝对可复现时，再临时钉具体版本并写进 CHANGELOG。
+#
+# 升级流程：rustup update stable → cargo test → cargo clippy --all-targets → 提交。
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
+

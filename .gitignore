@@ -1,0 +1,29 @@
+# ---------- Rust / Cargo ----------
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Tauri 构建期生成物（capability schema、图标中间产物等）
+/src-tauri/gen/
+/src-tauri/target/
+
+# ---------- Node / 前端 ----------
+node_modules/
+/dist/
+*.tsbuildinfo
+npm-debug.log*
+.vite/
+
+# ---------- 编辑器 / 系统 ----------
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+
+# ---------- 本地凭据（历史事故：曾误提交 api.txt） ----------
+api.txt
+*.key
+.env
+.env.*

@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "主窗口最小权限集：仅允许核心 IPC 与自身事件通道。",
+  "windows": ["main"],
+  "permissions": ["core:default", "core:window:allow-start-dragging", "core:app:allow-version"]
+}

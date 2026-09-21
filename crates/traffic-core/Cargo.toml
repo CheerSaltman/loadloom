@@ -1,0 +1,29 @@
+[package]
+name = "traffic-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Headless traffic-generation engine. Zero GUI dependencies: runs and tests without any window, browser or event loop."
+keywords = ["load-testing", "http", "benchmark", "tokio", "headless"]
+categories = ["development-tools::testing", "network-programming"]
+# 内部库，不发布到 crates.io。
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+futures-util = "0.3"
+reqwest = { version = "0.12", features = ["stream"] }
+thiserror = "2"
+# 纯类型反射，用于生成 TypeScript 契约；不含任何 GUI/渲染依赖。
+specta = { version = "=2.0.0-rc.25", features = ["derive"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }

@@ -1,0 +1,24 @@
+# EditorConfig（https://editorconfig.org）——被 VS Code / JetBrains / Vim 等原生支持。
+# 仓库内的换行与缩进以本文件为准，git 侧由 .gitattributes 兜底。
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.rs]
+indent_size = 4
+
+[*.{toml,yml,yaml,json,md}]
+indent_size = 2
+
+# Windows 原生命令行脚本用 CRLF，否则 cmd/PowerShell 解析会出问题。
+[*.{ps1,cmd,bat}]
+end_of_line = crlf
+
+[Makefile]
+indent_style = tab

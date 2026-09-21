@@ -1,0 +1,7 @@
+# 只使用 stable 上可用的选项，保证「本地 cargo fmt」与「CI cargo fmt --check」逐字节一致。
+# 刻意不启用 unstable_features：那会让格式结果依赖 nightly。
+edition = "2021"
+max_width = 100
+use_field_init_shorthand = true
+use_try_shorthand = true
+newline_style = "Unix"
