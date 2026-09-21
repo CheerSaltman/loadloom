@@ -94,6 +94,40 @@ fn blocks_second_start_while_running() {
 }
 
 #[test]
+fn concurrent_starts_admit_exactly_one_run() {
+    let engine = Engine::spawn();
+    let barrier = Arc::new(std::sync::Barrier::new(3));
+    let request = request("http://127.0.0.1:9/payload".to_owned(), true);
+
+    let mut handles = Vec::new();
+    for _ in 0..2 {
+        let engine = Arc::clone(&engine);
+        let barrier = Arc::clone(&barrier);
+        let request = request.clone();
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            engine.start(request)
+        }));
+    }
+
+    barrier.wait();
+    let outcomes = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("启动线程不应 panic"))
+        .collect::<Vec<_>>();
+
+    assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, Err(CoreError::AlreadyRunning(_))))
+            .count(),
+        1
+    );
+    engine.stop("测试结束");
+}
+
+#[test]
 fn streams_real_traffic_without_any_ui() {
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     runtime.block_on(async {

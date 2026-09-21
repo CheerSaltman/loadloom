@@ -389,25 +389,29 @@ impl Engine {
                 "请先确认：你拥有目标地址及其网络路径的明确测试授权".to_owned(),
             )));
         }
-        if self.inner_lock().running {
-            return Err(self.reject(CoreError::AlreadyRunning(
-                "测试已在运行中，请先停止".to_owned(),
-            )));
-        }
-
         let threads = request.threads.clamp(1, MAX_WORKERS);
         let rate_mib = request.rate_mib.clamp(0.0, MAX_RATE_MIB);
 
-        self.metrics.reset();
-        self.control.stop.store(false, Ordering::Release);
-        self.control.threads.store(threads, Ordering::Release);
-        self.control
-            .rate_bps
-            .store(mib_to_bps(rate_mib) as u64, Ordering::Release);
-        self.limiter.set_rate(mib_to_bps(rate_mib));
-
+        // 将“是否已运行”的检查和状态切换放在同一把锁内。Tauri command 可以并发
+        // 调用，原先在这里分两次取锁会让两个 start 都观察到 Idle，继而各自拉起一组
+        // worker。先标记 Running 后再释放锁，保证同一时刻只有一个调用能赢得启动权。
         {
             let mut inner = self.inner_lock();
+            if inner.running {
+                drop(inner);
+                return Err(self.reject(CoreError::AlreadyRunning(
+                    "测试已在运行中，请先停止".to_owned(),
+                )));
+            }
+
+            self.metrics.reset();
+            self.control.stop.store(false, Ordering::Release);
+            self.control.threads.store(threads, Ordering::Release);
+            self.control
+                .rate_bps
+                .store(mib_to_bps(rate_mib) as u64, Ordering::Release);
+            self.limiter.set_rate(mib_to_bps(rate_mib));
+
             inner.running = true;
             inner.url = url.clone();
             inner.started = Some(Instant::now());

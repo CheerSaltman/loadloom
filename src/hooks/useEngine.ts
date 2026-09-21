@@ -74,7 +74,7 @@ export function useEngine(): EngineState {
         // 指标推流（Channel，非轮询）
         await commands.subscribeMetrics((frame) => {
           // 丢弃乱序/重复帧，保证 UI 单调前进。
-          if (frame.seq < lastSeq.current) return;
+          if (frame.seq <= lastSeq.current) return;
           lastSeq.current = frame.seq;
           setSnapshot(frame);
           if (frame.latest) appendHistory([frame.latest], engineLimits.historyLen);
