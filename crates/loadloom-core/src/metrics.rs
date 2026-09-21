@@ -1,3 +1,8 @@
+//! 运行期指标聚合：热路径用原子计数器，错误分布与抖动状态用互斥保护。
+//!
+//! 读侧（250ms 一 tick）基本无锁：延迟、抖动、错误计数都直接读原子值；
+//! 只有写入错误分类和递推 RFC3550 抖动时才短暂持锁。
+
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -112,5 +117,51 @@ impl Metrics {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_snapshot_is_sorted_by_count_desc_and_capped_at_twelve() {
+        let metrics = Metrics::default();
+        for index in 0..15u64 {
+            let code = format!("E{index:02}");
+            for _ in 0..=index {
+                metrics.add_error(&code, "boom".to_owned());
+            }
+        }
+        let snapshot = metrics.error_snapshot();
+        assert_eq!(snapshot.len(), 12);
+        assert_eq!(snapshot[0].code, "E14");
+        assert_eq!(snapshot[0].count, 15);
+        assert!(snapshot
+            .windows(2)
+            .all(|pair| pair[0].count >= pair[1].count));
+        assert_eq!(metrics.last_error(), "boom");
+    }
+
+    #[test]
+    fn reset_clears_counters_and_error_state() {
+        let metrics = Metrics::default();
+        metrics.add_error("TIMEOUT", "timed out".to_owned());
+        metrics.record_latency(12.0);
+        metrics.reset();
+        assert!(metrics.error_snapshot().is_empty());
+        assert!(metrics.last_error().is_empty());
+        assert!(metrics.latency_ms().abs() < 1e-9);
+        assert!(metrics.jitter_ms().abs() < 1e-9);
+    }
+
+    #[test]
+    fn jitter_follows_the_rfc3550_recursion() {
+        let metrics = Metrics::default();
+        metrics.record_latency(10.0);
+        assert!(metrics.jitter_ms().abs() < 1e-9);
+        metrics.record_latency(26.0);
+        assert!((metrics.jitter_ms() - 1.0).abs() < 1e-9);
+        assert!((metrics.latency_ms() - 26.0).abs() < 1e-9);
     }
 }

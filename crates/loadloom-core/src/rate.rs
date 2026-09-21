@@ -1,3 +1,9 @@
+//! 令牌桶限速器：所有 worker 共享一个桶，速率可在运行中动态调整。
+//!
+//! 关键设计：`rate == 0`（不限速）是压测下的绝对热路径，此时通过 `rate_bits`
+//! 原子镜像做前置判断，完全免锁、免等待；只有真正限速时才进入互斥区。
+//! 桶容量随速率缩放（`rate * 0.05`）并设 128 KiB 下限，避免小速率下过度平滑。
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -92,5 +98,49 @@ impl RateLimiter {
 impl Default for RateLimiter {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mirror(limiter: &RateLimiter) -> f64 {
+        f64::from_bits(limiter.rate_bits.load(Ordering::Relaxed))
+    }
+
+    fn capacity(limiter: &RateLimiter) -> f64 {
+        limiter
+            .inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .capacity
+    }
+
+    #[test]
+    fn set_rate_is_mirrored_for_the_lock_free_fast_path() {
+        let limiter = RateLimiter::new();
+        limiter.set_rate(1_000_000.0);
+        assert!((mirror(&limiter) - 1_000_000.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn non_positive_rate_means_unlimited_and_clears_the_mirror() {
+        let limiter = RateLimiter::new();
+        limiter.set_rate(1_000_000.0);
+        limiter.set_rate(0.0);
+        assert!(mirror(&limiter).abs() < 1e-9);
+        limiter.set_rate(1_000_000.0);
+        limiter.set_rate(-42.0);
+        assert!(mirror(&limiter).abs() < 1e-9);
+    }
+
+    #[test]
+    fn capacity_tracks_rate_with_a_128kib_floor() {
+        let limiter = RateLimiter::new();
+        limiter.set_rate(10_000_000.0);
+        assert!((capacity(&limiter) - 500_000.0).abs() < 1.0);
+        limiter.set_rate(1.0);
+        assert!((capacity(&limiter) - 128.0 * 1024.0).abs() < 1.0);
     }
 }

@@ -1,7 +1,7 @@
 {
   "name": "loadloom",
   "private": true,
-  "version": "0.4.1",
+  "version": "0.4.2",
   "type": "module",
   "description": "LoadLoom — 原生桌面打流控制台（Tauri v2 + React + Tailwind）",
   "engines": {
