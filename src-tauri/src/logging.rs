@@ -67,7 +67,7 @@ pub(crate) fn level_label(level: LogLevel) -> &'static str {
 
 /// 写一行日志。
 ///
-/// **刻意永不 panic**：日志设施自身失败（磁盘满、权限不足、互斥锁中毒）绝不能
+/// 永不 panic：日志设施自身失败（磁盘满、权限不足、互斥锁中毒）绝不能
 /// 反过来拖垮应用 —— 那正是它在故障时最该派上用场的时刻。
 pub(crate) fn write(level: &str, message: &str) {
     let line = format!("{} [{}] {}\n", timestamp(), level, message);
@@ -139,7 +139,7 @@ fn install_panic_hook(app: AppHandle, engine: Arc<Engine>) {
 
 /// `YYYY-MM-DD HH:MM:SS.mmmZ`（UTC）。
 ///
-/// 刻意不引入 `chrono` / `time`：桌面壳只差一个时间戳，不值得为它扩大依赖树。
+/// 不引入 `chrono` / `time`：桌面壳只需要一个时间戳，不值得为此扩大依赖树。
 /// 代价是显示 UTC 而非本地时间 —— 日志里已显式标注 `Z`，排序与排查不受影响。
 fn timestamp() -> String {
     let now = std::time::SystemTime::now()

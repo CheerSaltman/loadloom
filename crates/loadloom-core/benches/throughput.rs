@@ -32,7 +32,7 @@ use tokio::net::TcpListener;
 
 use loadloom_core::{Engine, StartRunRequest};
 
-/// 单次响应体大小。刻意取 256 KiB：既不是小包（避免被每请求固定开销主导），
+/// 单次响应体大小。取 256 KiB：既不是小包（避免被每请求固定开销主导），
 /// 也不是大包（避免请求数太少、压不出并发调度的差异）。
 const BODY_LEN: usize = 256 * 1024;
 
@@ -44,7 +44,7 @@ const WARMUP: Duration = Duration::from_millis(600);
 
 /// 在**独立线程的独立运行时**上起一个高并发本地 origin。
 ///
-/// 刻意与引擎的运行时分开：否则两者抢同一组 worker 线程，测出来的数字既不是
+/// 与引擎的运行时分开：否则两者抢同一组 worker 线程，测出来的数字既不是
 /// 引擎的吞吐，也不是 origin 的吞吐。
 fn spawn_fast_origin(body_len: usize) -> (u16, Arc<tokio::runtime::Runtime>) {
     let runtime = Arc::new(
@@ -151,7 +151,7 @@ fn spawn_fast_origin(body_len: usize) -> (u16, Arc<tokio::runtime::Runtime>) {
 
 /// 在给定的并发下测一段时间的稳态速率，返回 MiB/s。
 fn measure(port: u16, threads: u32) -> f64 {
-    // 刻意从**裸线程**（无 Tokio 运行时）构造引擎：这正是 Tauri 同步 command
+    // 从**裸线程**（无 Tokio 运行时）构造引擎：这正是 Tauri 同步 command
     // 所处的环境，也是 `Executor` 自建运行时的那条路径。
     let engine = Engine::spawn();
     engine

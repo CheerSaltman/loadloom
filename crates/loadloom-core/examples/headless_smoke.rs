@@ -20,7 +20,7 @@ use std::time::Duration;
 use loadloom_core::{Engine, StartRunRequest};
 
 fn main() {
-    // 前置断言：本示例刻意跑在一个裸线程上（main 线程没有 Tokio 运行时）。
+    // 前置断言：本示例运行在一个裸线程上（main 线程没有 Tokio 运行时）。
     // 如果这里失败，说明有人给 main 套了 #[tokio::main] 之类的运行时，
     // 那就不再是在验证「无运行时上下文也能启动」这件事了。
     assert!(

@@ -14,8 +14,7 @@ publish = false
 workspace = true
 
 [lib]
-# 与 bin target 同名会触发 `output filename collision` 警告（bin/lib 的 .pdb 同名），
-# 这里加 `_lib` 后缀区分；bin 名仍由 package.name 决定。
+# 与 bin target 同名会触发 `output filename collision`（二者 .pdb 同名），加 `_lib` 后缀区分；bin 名仍由 package.name 决定。
 name = "loadloom_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 

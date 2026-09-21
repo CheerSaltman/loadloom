@@ -3,7 +3,7 @@
 ## 环境
 
 - Rust：由 `rust-toolchain.toml` 固定，装了 rustup 就自动生效。
-- Node：见 `package.json` 的 `engines` 约定；本项目在 Node 22 上验证通过。
+- Node：≥ 20；CI 使用 Node 22。
 
 ## 本地构建与验证
 

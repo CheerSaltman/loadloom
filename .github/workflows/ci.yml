@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # 格式检查：最便宜、最快，独立成一个 job，红了立刻知道是格式问题。
+  # 格式检查：最快，独立成一个 job。
   fmt:
     name: cargo fmt
     runs-on: ubuntu-latest
@@ -26,7 +26,7 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
-  # 无头核心：不需要图形环境，所以跑在 Linux 上，快且省。
+  # 无头核心：不需要图形环境，跑在 Linux 上。
   core:
     name: core (fmt + clippy + test)
     runs-on: ubuntu-latest

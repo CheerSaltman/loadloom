@@ -43,7 +43,7 @@
 
 - `crates/loadloom-core`：无头打流引擎，不依赖窗口、浏览器或事件循环。
 - `src-tauri`：Tauri v2 桌面外壳，只做 IPC 桥接。
-- 运行日志：落盘到 `%LOCALAPPDATA%\LoadLoom\logs\loadloom.log`，并推送到界面「运行日志」页。
+- 运行日志：落盘到 `%LOCALAPPDATA%\TrafficConsole\logs\loadloom.log`，并推送到界面「运行日志」页。
 - panic hook：崩溃写入日志文件。
 - `open_log_dir` / `get_log_path` 命令。
 - 契约守护测试 `crates/loadloom-core/tests/contract_wire.rs`。

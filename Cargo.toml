@@ -5,15 +5,13 @@ members = ["crates/loadloom-core", "src-tauri"]
 [workspace.package]
 version = "0.4.0"
 edition = "2021"
-# 与 rust-toolchain.toml 固定的编译器保持一致。这是**已验证**的下限：
-# 想下调请用 cargo-msrv 实测后再改（`cargo msrv --bisect`），不要凭感觉写。
+# 与 rust-toolchain.toml 固定的编译器一致；下调前需用 `cargo msrv --bisect` 实测。
 rust-version = "1.98"
 authors = ["LoadLoom contributors"]
 license = "MIT"
 repository = "https://github.com/CheerSaltman/loadloom"
 
-# 工作区级 lint：`[lints] workspace = true` 让每个成员统一继承。
-# 只放不会误伤现有代码的项，保证 CI 的 `-D warnings` 可信。
+# 工作区级 lint：`[lints] workspace = true` 让每个成员统一继承，仅收录不会误报的项。
 [workspace.lints.rust]
 unsafe_code = "forbid"
 unreachable_pub = "warn"
@@ -32,10 +30,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"
 [profile.release]
 opt-level = 3
 lto = "thin"
-# 保留行号表，让崩溃回溯能定位到具体代码行。
-# Windows 上调试符号存放在独立的 .pdb 中，对发布的 exe 体积几乎没有影响。
+# 保留行号表，让崩溃回溯能定位到具体代码行（Windows 上符号在独立 .pdb 中，对 exe 体积影响很小）。
 debug = "line-tables-only"
-# 刻意**不**设置 `panic = "abort"`：
-# 桌面应用里，后台 worker 任务的一次 panic 不应该让整个进程消失（且不留任何痕迹）。
-# 保持 unwind 后，Tokio 会捕获任务内的 panic 并只终止该任务，UI 得以存活并报错。
+# 保持 unwind：Tokio 会捕获任务内的 panic 并只终止该任务，UI 得以存活并报错。
 panic = "unwind"

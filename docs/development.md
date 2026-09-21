@@ -46,8 +46,7 @@ cargo run   --locked --example headless_smoke -p loadloom-core     # 示例可�
 cargo test --release -p loadloom-core --bench throughput -- --ignored --nocapture
 ```
 
-> **注意**：回环地址上的吞吐数字只能回答「引擎能不能跑起来、速率是否随并发上升」，
-> 不适合用来给真实目标的吞吐下结论 —— 瓶颈通常落在测试机自身或回环协议栈上。
+> 回环地址上的吞吐数字只能说明引擎能否运行、速率是否随并发上升，不能代表真实目标的吞吐 —— 瓶颈通常在测试机自身或回环协议栈上。
 
 ## 本机验收
 
@@ -67,7 +66,7 @@ scripts/make_icon.mjs           # 图标生成
    git tag -a v0.4.0 -m "LoadLoom v0.4.0"
    git push origin v0.4.0
    ```
-4. 推送 tag 后无需人工出包：`.github/workflows/release.yml` 会在 tag 推送时自动跑质量门禁、
+4. 推送 tag 后无需人工出包：`.github/workflows/release.yml` 会在 tag 推送时自动跑核心测试与前端类型检查、
    构建并上传三个产物到对应 Release。
 
    > 手工兜底（CI 不可用时）：在本机执行 `npm run desktop:build`，再按上表产物上传到 Release。
@@ -78,7 +77,6 @@ scripts/make_icon.mjs           # 图标生成
    | NSIS 安装包 | `target/release/bundle/nsis/LoadLoom_<版本>_x64-setup.exe` |
    | MSI 安装包 | `target/release/bundle/msi/LoadLoom_<版本>_x64_en-US.msi` |
 
-> GitHub 会把资产名里的空格规范化为点号（`LoadLoom_...` → `Traffic.Console_...`），属正常行为。
 
 ## 本机环境注意事项
 

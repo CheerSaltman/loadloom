@@ -1,4 +1,4 @@
-# 依赖自动更新：与 CI 配合，让「依赖漂移」变成可审阅的小 PR，而不是某天的意外。
+# 依赖自动更新（cargo / npm / actions）
 version: 2
 updates:
   - package-ecosystem: cargo

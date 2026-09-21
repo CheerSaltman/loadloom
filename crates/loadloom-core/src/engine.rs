@@ -444,7 +444,7 @@ impl Executor {
 
     /// 派发一个后台任务。**可在任意线程调用**（这正是修复闪退的关键）。
     ///
-    /// 刻意不接受带返回值的 future：引擎里的后台任务都是常驻循环或 fire-and-forget，
+    /// 只接受无返回值的 future：引擎里的后台任务都是常驻循环或 fire-and-forget，
     /// 不允许调用方 `.await` 任务结果，避免把后台任务重新耦合回调用栈。
     fn spawn<F>(&self, future: F)
     where
