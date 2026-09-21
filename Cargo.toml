@@ -1,16 +1,16 @@
 [workspace]
 resolver = "2"
-members = ["crates/traffic-core", "src-tauri"]
+members = ["crates/loadloom-core", "src-tauri"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 # 与 rust-toolchain.toml 固定的编译器保持一致。这是**已验证**的下限：
 # 想下调请用 cargo-msrv 实测后再改（`cargo msrv --bisect`），不要凭感觉写。
 rust-version = "1.98"
-authors = ["Traffic Console contributors"]
+authors = ["LoadLoom contributors"]
 license = "MIT"
-repository = "https://github.com/CheerSaltman/traffic-console"
+repository = "https://github.com/CheerSaltman/loadloom"
 
 # 工作区级 lint：`[lints] workspace = true` 让每个成员统一继承。
 # 只放不会误伤现有代码的项，保证 CI 的 `-D warnings` 可信。

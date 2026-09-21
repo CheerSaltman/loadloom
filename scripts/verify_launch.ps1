@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-$exe = 'C:\Goose\代码工程\traffic-console\target\release\traffic-console-desktop.exe'
+$exe = Join-Path (Split-Path -Parent $PSScriptRoot) 'target\release\loadloom-desktop.exe'
 
 function Get-BrowserCount {
   @(Get-Process -ErrorAction SilentlyContinue |

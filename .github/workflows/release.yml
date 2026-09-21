@@ -34,7 +34,7 @@ jobs:
 
       - name: 质量门禁
         run: |
-          cargo test --locked -p traffic-core
+          cargo test --locked -p loadloom-core
           npm run typecheck
 
       - name: 构建原生安装包
@@ -51,11 +51,11 @@ jobs:
           # Release 不存在则创建；已存在则只补产物，不覆盖说明。
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
             || gh release create "$GITHUB_REF_NAME" \
-                 --title "Traffic Console $GITHUB_REF_NAME" \
+                 --title "LoadLoom $GITHUB_REF_NAME" \
                  --notes "本次变更见 CHANGELOG.md。"
 
           gh release upload "$GITHUB_REF_NAME" \
-            "target/release/traffic-console-desktop.exe" \
-            "target/release/bundle/nsis/Traffic Console_${VERSION}_x64-setup.exe" \
-            "target/release/bundle/msi/Traffic Console_${VERSION}_x64_en-US.msi" \
+            "target/release/loadloom-desktop.exe" \
+            "target/release/bundle/nsis/LoadLoom_${VERSION}_x64-setup.exe" \
+            "target/release/bundle/msi/LoadLoom_${VERSION}_x64_en-US.msi" \
             --clobber

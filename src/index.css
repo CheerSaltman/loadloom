@@ -120,7 +120,7 @@ input[type="range"]:disabled {
   opacity: 0.45;
 }
 
-@keyframes tc-pulse {
+@keyframes ll-pulse {
   0%,
   100% {
     opacity: 1;
@@ -129,6 +129,6 @@ input[type="range"]:disabled {
     opacity: 0.25;
   }
 }
-.tc-live-dot {
-  animation: tc-pulse 1.4s ease-in-out infinite;
+.ll-live-dot {
+  animation: ll-pulse 1.4s ease-in-out infinite;
 }

@@ -25,9 +25,9 @@ npm run desktop:build                      # 打包：exe + NSIS + MSI
 
 ```bash
 cargo fmt --all --check                                          # 格式
-cargo clippy --locked -p traffic-core --all-targets -- -D warnings
-cargo test  --locked -p traffic-core                             # 18 个测试，不需要图形环境
-cargo run   --locked --example headless_smoke -p traffic-core     # 示例可运行
+cargo clippy --locked -p loadloom-core --all-targets -- -D warnings
+cargo test  --locked -p loadloom-core                             # 18 个测试，不需要图形环境
+cargo run   --locked --example headless_smoke -p loadloom-core     # 示例可运行
 ```
 
 任何一步失败都**不要**进入下一步。CI（`.github/workflows/ci.yml`）会把同样的门禁再跑一遍。
@@ -40,10 +40,10 @@ cargo run   --locked --example headless_smoke -p traffic-core     # 示例可运
 | `contract_wire` | 7 | 解析 `src/bindings.ts` 逐字段比对 serde 实产 JSON |
 | `headless_e2e` | 5 | 本地伪 origin 跑真实打流，含「裸线程无 Tokio 运行时」启动 |
 
-`crates/traffic-core/benches/throughput.rs` 是基准台，默认被 `#[ignore]` 门控，需要显式启用：
+`crates/loadloom-core/benches/throughput.rs` 是基准台，默认被 `#[ignore]` 门控，需要显式启用：
 
 ```bash
-cargo test --release -p traffic-core --bench throughput -- --ignored --nocapture
+cargo test --release -p loadloom-core --bench throughput -- --ignored --nocapture
 ```
 
 > **注意**：回环地址上的吞吐数字只能回答「引擎能不能跑起来、速率是否随并发上升」。
@@ -64,8 +64,8 @@ scripts/make_icon.mjs           # 图标生成
 2. 更新各处的版本号（`Cargo.toml` 工作区 `version`、`package.json`），提交。
 3. 打标签并推送：
    ```bash
-   git tag -a v0.3.0 -m "Traffic Console v0.3.0"
-   git push origin v0.3.0
+   git tag -a v0.4.0 -m "LoadLoom v0.4.0"
+   git push origin v0.4.0
    ```
 4. **推送 tag 后无需人工出包**：`.github/workflows/release.yml` 会在 tag 推送时自动跑质量门禁、
    构建并上传三个产物到对应 Release。首次实际生效见仓库 Actions 页。
@@ -76,11 +76,11 @@ scripts/make_icon.mjs           # 图标生成
 
    | 产物 | 路径 |
    | --- | --- |
-   | 免安装 exe | `target/release/traffic-console-desktop.exe` |
-   | NSIS 安装包 | `target/release/bundle/nsis/Traffic Console_<版本>_x64-setup.exe` |
-   | MSI 安装包 | `target/release/bundle/msi/Traffic Console_<版本>_x64_en-US.msi` |
+   | 免安装 exe | `target/release/loadloom-desktop.exe` |
+   | NSIS 安装包 | `target/release/bundle/nsis/LoadLoom_<版本>_x64-setup.exe` |
+   | MSI 安装包 | `target/release/bundle/msi/LoadLoom_<版本>_x64_en-US.msi` |
 
-> GitHub 会把资产名里的空格规范化为点号（`Traffic Console_...` → `Traffic.Console_...`），属正常行为。
+> GitHub 会把资产名里的空格规范化为点号（`LoadLoom_...` → `Traffic.Console_...`），属正常行为。
 
 ## 本机环境注意事项
 
@@ -89,7 +89,7 @@ scripts/make_icon.mjs           # 图标生成
   ```text
   [vite:build-html] The "fileName" or "name" properties of emitted chunks and assets
   must be strings that are neither absolute nor relative paths,
-  received "../<真实目录名>/traffic-console/index.html"
+  received "../<真实目录名>/loadloom/index.html"
   ```
   原因是 Vite 会把路径解析回真实路径，再计算相对路径时多出 `..`，Rollup 直接拒绝。
   **请始终在项目真实路径下构建**，联接仅可用于 `git` 等工具。

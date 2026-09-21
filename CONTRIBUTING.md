@@ -9,7 +9,7 @@
 
 ```bash
 # 1. 无头核心（不需要任何图形环境，CI 只跑这一层）
-cargo test --locked -p traffic-core
+cargo test --locked -p loadloom-core
 
 # 2. 前端类型与打包
 npm ci
@@ -20,7 +20,7 @@ npm run build
 npm run desktop:build
 
 # 4. 可选：吞吐标定（会占满 CPU 数秒，默认被 #[ignore] 跳过）
-cargo bench --locked -p traffic-core -- --ignored --nocapture
+cargo bench --locked -p loadloom-core -- --ignored --nocapture
 ```
 
 提交前请确保 `cargo fmt --all` 与 `cargo clippy --all-targets` 无新增问题。
@@ -29,13 +29,13 @@ cargo bench --locked -p traffic-core -- --ignored --nocapture
 
 改动前请先读 `docs/architecture.md`。以下三条**不接受**例外：
 
-1. **`traffic-core` 里不许出现任何 GUI / 窗口 / 浏览器依赖。**
+1. **`loadloom-core` 里不许出现任何 GUI / 窗口 / 浏览器依赖。**
    它是无头业务核心，要能在 CI 里跑、能在没有桌面环境的机器上跑。
    新增依赖请先自问：它会把 `windows` / `webview` / `eframe` 拖进来吗？
 2. **长耗时的数据流一律用异步推送，禁止轮询。**
    高频指标走 `tauri::ipc::Channel`，低频事件走 `app.emit`；
    前端不许用 `setInterval` 去拉状态。
-3. **契约改动必须三处同步**：`crates/traffic-core/src/contract.rs`（单一事实来源）、
+3. **契约改动必须三处同步**：`crates/loadloom-core/src/contract.rs`（单一事实来源）、
    `src/bindings.ts`（TS 镜像）、以及 `tests/contract_wire.rs`（机械护栏）。
    护栏会解析 TS 源码逐字段比对；只改一边会让 CI 直接红。
 

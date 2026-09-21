@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 
-use traffic_core::{CoreError, Engine, LiveConfigPatch, RunPhase, StartRunRequest};
+use loadloom_core::{CoreError, Engine, LiveConfigPatch, RunPhase, StartRunRequest};
 
 /// 一个极简的本地 HTTP 服务：对每个连接回一个固定大小的响应体。
 /// 用来在完全离线、无界面的条件下驱动真实打流链路。
@@ -152,7 +152,7 @@ fn streams_real_traffic_without_any_ui() {
 
         // 握手快照携带历史曲线，且不超过环形上限。
         let handshake = engine.snapshot(true);
-        assert!(handshake.history.len() <= traffic_core::Engine::limits().history_len as usize);
+        assert!(handshake.history.len() <= loadloom_core::Engine::limits().history_len as usize);
     });
 }
 

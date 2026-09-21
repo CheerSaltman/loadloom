@@ -1,9 +1,9 @@
 {
-  "name": "traffic-console",
+  "name": "loadloom",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
-  "description": "Traffic Console — 原生桌面打流控制台（Tauri v2 + React + Tailwind）",
+  "description": "LoadLoom — 原生桌面打流控制台（Tauri v2 + React + Tailwind）",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",

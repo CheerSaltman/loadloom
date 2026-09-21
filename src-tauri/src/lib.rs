@@ -2,7 +2,7 @@
 //!
 //! 职责边界：
 //! * 创建原生窗口 / 托盘 / 主题跟随；
-//! * 把 [`traffic_core::Engine`] 的能力暴露为强类型 Command；
+//! * 把 [`loadloom_core::Engine`] 的能力暴露为强类型 Command；
 //! * 把引擎的广播通道转成 Event / Channel 推流（前端零轮询）；
 //! * 把日志落盘并捕获 panic（见 [`logging`]）—— 保证任何异常都可事后分析。
 
@@ -15,14 +15,14 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use traffic_core::{
+use loadloom_core::{
     CoreError, Engine, EngineLimits, LiveConfigPatch, MetricsSnapshot, StartRunRequest,
 };
 
 /// 日志流事件名。
-pub const EVENT_LOG: &str = "traffic://log";
+pub const EVENT_LOG: &str = "loadloom://log";
 /// 生命周期事件名。
-pub const EVENT_RUN: &str = "traffic://run-event";
+pub const EVENT_RUN: &str = "loadloom://run-event";
 
 /// 应用状态：仅持有一个引擎句柄。
 pub struct AppState {
@@ -118,7 +118,7 @@ fn open_log_dir() -> Result<String, String> {
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            // 引擎自带执行器（见 traffic_core::Executor），**无需**外层运行时上下文，
+            // 引擎自带执行器（见 loadloom_core::Executor），**无需**外层运行时上下文，
             // 因此在 setup 主线程里可以直接构造，不必再包一层 block_on。
             let engine = Engine::spawn();
             app.manage(AppState {
@@ -153,7 +153,7 @@ pub fn run() {
 
             let mut tray = TrayIconBuilder::with_id("main-tray")
                 .menu(&menu)
-                .tooltip("Traffic Console · 打流控制台")
+                .tooltip("LoadLoom · 打流控制台")
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => reveal(app),
                     "quit" => app.exit(0),
@@ -194,7 +194,7 @@ pub fn run() {
             quit_app
         ])
         .run(tauri::generate_context!())
-        .expect("启动 Traffic Console 桌面应用失败");
+        .expect("启动 LoadLoom 桌面应用失败");
 }
 
 fn reveal(app: &AppHandle) {

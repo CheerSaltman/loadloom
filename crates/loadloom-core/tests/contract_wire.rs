@@ -5,13 +5,13 @@
 //! 逐一比对。因此只要两侧有一方漂移（改字段名、加字段、改枚举拼写、把可选字段
 //! 变成非可选），本测试立刻失败 —— 无需依赖 `tauri-specta` 也能获得等价的护栏。
 //!
-//! 运行：`cargo test -p traffic-core --test contract_wire`
+//! 运行：`cargo test -p loadloom-core --test contract_wire`
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use serde::Serialize;
-use traffic_core::{
+use loadloom_core::{
     CoreError, EngineLimits, ErrorCount, HistoryPoint, LiveConfigPatch, LogEntry, LogLevel,
     MetricsSnapshot, RunEvent, RunEventKind, RunPhase, StartRunRequest,
 };

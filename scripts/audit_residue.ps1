@@ -1,4 +1,4 @@
-$root = 'C:\Goose\代码工程\traffic-console'
+$root = Split-Path -Parent $PSScriptRoot   # repo root (this script lives in <repo>/scripts/)
 $pattern = 'egui|eframe|webbrowser|axum|include_str!|Tkinter|PyQt|PySide|WinForms|wxWidgets|18080|ws://|/api/|Chart\.js|cdn\.|cdnjs|unpkg|jsdelivr'
 $ext = @('.rs', '.ts', '.tsx', '.json', '.toml', '.html', '.css', '.mjs', '.js')
 
@@ -28,8 +28,8 @@ Get-ChildItem -Path $root -Recurse -Filter 'Cargo.toml' -File -ErrorAction Silen
   }
 
 Write-Output ''
-Write-Output '=== traffic-core dependency closure (must be GUI-free) ==='
-$coreToml = Join-Path $root 'crates\traffic-core\Cargo.toml'
+Write-Output '=== loadloom-core dependency closure (must be GUI-free) ==='
+$coreToml = Join-Path $root 'crates\loadloom-core\Cargo.toml'
 (Get-Content $coreToml) | Where-Object { $_ -match '^\[dependencies\]' } | Out-Null
 $inDeps = $false
 Get-Content $coreToml | ForEach-Object {

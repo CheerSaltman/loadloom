@@ -5,7 +5,7 @@
 //! 没有文件，用户只能看到「闪退」两个字。本模块保证任何异常都留下可分析的痕迹。
 //!
 //! 两条出口，缺一不可：
-//! 1. **落盘** —— 引擎日志与崩溃报告写入 `%LOCALAPPDATA%\TrafficConsole\logs\`，
+//! 1. **落盘** —— 引擎日志与崩溃报告写入 `%LOCALAPPDATA%\LoadLoom\logs\`，
 //!    即使进程被强杀，事后依然可以回溯；
 //! 2. **上屏** —— panic 信息同时推进引擎的日志流，前端「运行日志」页立刻可见，
 //!    用户不必先去翻文件才知道发生了什么。
@@ -17,25 +17,25 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use tauri::AppHandle;
 
-use traffic_core::{Engine, LogLevel};
+use loadloom_core::{Engine, LogLevel};
 
-/// 单文件上限，超过则轮转为 `traffic-console.prev.log`。
+/// 单文件上限，超过则轮转为 `loadloom.prev.log`。
 const MAX_LOG_BYTES: u64 = 4 * 1024 * 1024;
 
 static SINK: OnceLock<Mutex<File>> = OnceLock::new();
 
-/// 日志目录：`%LOCALAPPDATA%\TrafficConsole\logs`。
+/// 日志目录：`%LOCALAPPDATA%\LoadLoom\logs`。
 pub(crate) fn log_dir() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
-        .join("TrafficConsole")
+        .join("LoadLoom")
         .join("logs")
 }
 
 /// 主日志文件路径。
 pub(crate) fn log_file() -> PathBuf {
-    log_dir().join("traffic-console.log")
+    log_dir().join("loadloom.log")
 }
 
 fn open_sink() -> File {
@@ -45,14 +45,14 @@ fn open_sink() -> File {
 
     // 简单轮转，避免日志无限增长。
     if fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0) > MAX_LOG_BYTES {
-        let _ = fs::rename(&path, dir.join("traffic-console.prev.log"));
+        let _ = fs::rename(&path, dir.join("loadloom.prev.log"));
     }
 
     OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
-        .or_else(|_| File::create(std::env::temp_dir().join("traffic-console.log")))
+        .or_else(|_| File::create(std::env::temp_dir().join("loadloom.log")))
         .expect("无法创建日志文件")
 }
 

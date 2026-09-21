@@ -57,7 +57,7 @@ pub fn cache_busted_url(url: &str, worker_id: u32, request_id: u64) -> String {
         format!("#{fragment}")
     };
     let separator = if base.contains('?') { "&" } else { "?" };
-    format!("{base}{separator}_tc={worker_id}-{request_id}{suffix}")
+    format!("{base}{separator}_ll={worker_id}-{request_id}{suffix}")
 }
 
 /// 自动停止判定：返回 `Some(原因)` 表示应当停止。
@@ -434,7 +434,7 @@ impl Executor {
             Ok(handle) => Executor::Ambient(handle),
             Err(_) => Executor::Owned(OwnedRuntime(Some(
                 tokio::runtime::Builder::new_multi_thread()
-                    .thread_name("traffic-core")
+                    .thread_name("loadloom-core")
                     .enable_all()
                     .build()
                     .expect("创建打流引擎运行时失败"),
@@ -812,7 +812,7 @@ fn build_client() -> reqwest::Client {
         .pool_max_idle_per_host(MAX_WORKERS as usize)
         .pool_idle_timeout(Duration::from_secs(30))
         .tcp_nodelay(true)
-        .user_agent("traffic-console/0.3 (+authorized-load-test)");
+        .user_agent("loadloom/0.4 (+authorized-load-test)");
     match builder.build() {
         Ok(client) => client,
         Err(_) => reqwest::Client::new(),
@@ -941,11 +941,11 @@ mod tests {
     fn cache_buster_preserves_query_and_fragment() {
         assert_eq!(
             cache_busted_url("https://example.test/file?a=1#part", 2, 3),
-            "https://example.test/file?a=1&_tc=2-3#part"
+            "https://example.test/file?a=1&_ll=2-3#part"
         );
         assert_eq!(
             cache_busted_url("https://example.test/file", 0, 1),
-            "https://example.test/file?_tc=0-1"
+            "https://example.test/file?_ll=0-1"
         );
     }
 

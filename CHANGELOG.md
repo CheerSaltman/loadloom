@@ -26,7 +26,7 @@
 
 - tauri-specta 发布稳定版后，用自动生成的类型替换手写的 `src/bindings.ts`
   （调用侧零改动，见 `docs/architecture.md`）。
-- 把 `crates/traffic-core/benches/throughput.rs` 升级为 criterion 基准，
+- 把 `crates/loadloom-core/benches/throughput.rs` 升级为 criterion 基准，
   并接入历史基线对比。
 
 ## [0.3.0] - 2026-09-21
@@ -35,14 +35,14 @@
 
 ### 新增
 
-- `crates/traffic-core`：无头打流引擎，零 GUI 依赖，可在没有窗口、没有浏览器、
+- `crates/loadloom-core`：无头打流引擎，零 GUI 依赖，可在没有窗口、没有浏览器、
   没有事件循环的环境下运行与测试。
 - `src-tauri`：Tauri v2 原生桌面壳，只做 IPC 桥接，不含业务逻辑。
-- 运行日志：落盘到 `%LOCALAPPDATA%\TrafficConsole\logs\traffic-console.log`
+- 运行日志：落盘到 `%LOCALAPPDATA%\LoadLoom\logs\loadloom.log`
   （4 MB 自动轮转），并同时推送到界面「运行日志」页。
 - panic hook：捕获崩溃写入日志文件并推进日志流，崩溃不再是「无声闪退」。
 - `open_log_dir` / `get_log_path` 两个命令，便于用户自行取证。
-- 契约守护测试 `crates/traffic-core/tests/contract_wire.rs`：解析
+- 契约守护测试 `crates/loadloom-core/tests/contract_wire.rs`：解析
   `src/bindings.ts` 源码，与 Rust 侧 serde 输出逐字段比对。
 
 ### 修复
@@ -65,5 +65,5 @@
 - egui / eframe / webbrowser / axum 等一切历史 GUI 或本地服务遗留。
 - 界面上的技术标签（引擎/壳/推流说明），用户不关心这些内部细节。
 
-[未发布]: https://github.com/CheerSaltman/traffic-console/compare/v0.3.0...HEAD
-[0.3.0]: https://github.com/CheerSaltman/traffic-console/releases/tag/v0.3.0
+[未发布]: https://github.com/CheerSaltman/loadloom/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/CheerSaltman/loadloom/releases/tag/v0.3.0

@@ -6,8 +6,8 @@
 
 ```
 ┌──────────────────────────┐        ┌──────────────────────────────┐
-│  WebView（React + TW）    │        │  traffic-core（无头引擎）      │
-│  src/                     │        │  crates/traffic-core/        │
+│  WebView（React + TW）    │        │  loadloom-core（无头引擎）      │
+│  src/                     │        │  crates/loadloom-core/        │
 │   · 只做展示与交互          │        │   · 打流、限速、计量、日志      │
 │   · 不轮询、不算业务        │        │   · 零 GUI 依赖，可独立测试     │
 └───────────▲──────────────┘        └──────────────▲───────────────┘
@@ -28,7 +28,7 @@
 
 切分之后：
 
-- 引擎的每一条约束都能用**无头测试**钉住（`cargo test -p traffic-core`，
+- 引擎的每一条约束都能用**无头测试**钉住（`cargo test -p loadloom-core`，
   CI 里不需要任何图形环境）。
 - 壳的失败模式被压缩到「桥接层」这一小块，业务正确性不再依赖窗口能不能开。
 
@@ -61,14 +61,14 @@ Tokio 会 panic。`OwnedRuntime` 把真正的释放动作挪到一条裸线程�
 | 数据 | 通道 | 理由 |
 | --- | --- | --- |
 | 高频指标（250 ms） | `tauri::ipc::Channel<MetricsSnapshot>` | 单向、可背压、不占事件循环 |
-| 低频事件（开始/停止/拒绝） | `app.emit("traffic://run-event")` | 需要广播给多个监听者 |
-| 运行日志 | `app.emit("traffic://log")` | 与落盘日志同源，界面可即时取证 |
+| 低频事件（开始/停止/拒绝） | `app.emit("loadloom://run-event")` | 需要广播给多个监听者 |
+| 运行日志 | `app.emit("loadloom://log")` | 与落盘日志同源，界面可即时取证 |
 
 前端不得用 `setInterval` 拉状态。用户可见的「实时」全部来自推送。
 
 ### 5. 契约单一事实来源
 
-`crates/traffic-core/src/contract.rs` 是唯一权威；`src/bindings.ts` 是它的手写镜像；
+`crates/loadloom-core/src/contract.rs` 是唯一权威；`src/bindings.ts` 是它的手写镜像；
 `tests/contract_wire.rs` 会解析 TS 源码并与 serde 的 JSON 输出逐字段比对
 （字段名、可选性、枚举字面量、`CoreError` 的判别式顺序）。
 
@@ -79,7 +79,7 @@ Tokio 会 panic。`OwnedRuntime` 把真正的释放动作挪到一条裸线程�
 ### 6. 崩溃必须留痕
 
 `src-tauri/src/logging.rs` 安装 panic hook：崩溃信息既写入
-`%LOCALAPPDATA%\TrafficConsole\logs\traffic-console.log`（4 MB 轮转），
+`%LOCALAPPDATA%\LoadLoom\logs\loadloom.log`（4 MB 轮转），
 也推进引擎日志流，界面「运行日志」页当场可见。
 配套 `get_log_path` / `open_log_dir` 两个命令，用户可自行取证。
 release profile 因此保留 `panic = "unwind"` 与 `debug = "line-tables-only"`。
@@ -87,8 +87,8 @@ release profile 因此保留 `panic = "unwind"` 与 `debug = "line-tables-only"`
 ## 目录约定
 
 ```
-traffic-console/
-├── crates/traffic-core/     # 无头引擎（库）
+loadloom/
+├── crates/loadloom-core/     # 无头引擎（库）
 │   ├── src/
 │   ├── tests/               # 集成测试（contract_wire, headless_e2e）
 │   ├── benches/             # 基准（throughput）

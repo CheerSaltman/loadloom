@@ -1932,6 +1932,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 
 [[package]]
+name = "loadloom-core"
+version = "0.4.0"
+dependencies = [
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "specta",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
+name = "loadloom-desktop"
+version = "0.4.0"
+dependencies = [
+ "loadloom-core",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tokio",
+]
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4098,31 +4123,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
-]
-
-[[package]]
-name = "traffic-console-desktop"
-version = "0.3.0"
-dependencies = [
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tokio",
- "traffic-core",
-]
-
-[[package]]
-name = "traffic-core"
-version = "0.3.0"
-dependencies = [
- "futures-util",
- "reqwest",
- "serde",
- "serde_json",
- "specta",
- "thiserror 2.0.20",
- "tokio",
 ]
 
 [[package]]

@@ -4,7 +4,7 @@
 
 | 条目 | 依据 | 本仓库对应物 |
 | --- | --- | --- |
-| 包布局 `src/tests/benches/examples` | Cargo Book · Package Layout | `crates/traffic-core/` 四分目录；基准不混进 `tests/` |
+| 包布局 `src/tests/benches/examples` | Cargo Book · Package Layout | `crates/loadloom-core/` 四分目录；基准不混进 `tests/` |
 | 清单元数据与工作区继承 | Cargo Book · Manifest / Workspaces | `[workspace.package]` + 各 crate 的 `xxx.workspace = true` |
 | 统一 lint 策略 | Cargo Book · `[lints]` | `[workspace.lints.rust/clippy]` + 成员 `[lints] workspace = true` |
 | 禁止 unsafe | Rust 参考 · `unsafe_code` lint | `[workspace.lints.rust] unsafe_code = "forbid"` |

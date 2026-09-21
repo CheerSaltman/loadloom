@@ -1,14 +1,14 @@
 //! 最小可运行示例：在**没有 Tokio 运行时、没有窗口、没有事件循环**的普通线程上
 //! 启动一次打流。
 //!
-//! 这个示例存在的意义是把 `traffic-core` 的核心约束钉死成可执行的文档：
+//! 这个示例存在的意义是把 `loadloom-core` 的核心约束钉死成可执行的文档：
 //! 引擎不假设调用方线程处于任何运行时上下文中 —— 而这个隐含假设曾经导致
 //! 生产事故（点「开始」整个进程闪退）。任何破坏该约束的改动都会让这个示例编译
 //! 或运行失败。
 //!
 //! 运行：
 //! ```text
-//! cargo run --example headless_smoke -p traffic-core
+//! cargo run --example headless_smoke -p loadloom-core
 //! ```
 //!
 //! 目标地址指向本机回环上一个**关闭**的端口：示例因此不需要外网、不触碰任何
@@ -17,7 +17,7 @@
 
 use std::time::Duration;
 
-use traffic_core::{Engine, StartRunRequest};
+use loadloom_core::{Engine, StartRunRequest};
 
 fn main() {
     // 前置断言：本示例刻意跑在一个裸线程上（main 线程没有 Tokio 运行时）。

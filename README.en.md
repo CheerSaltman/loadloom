@@ -1,17 +1,17 @@
-# Traffic Console
+# LoadLoom
 
 **Authorized load-testing console — headless engine + native desktop shell**
 
 [简体中文](README.md) | **English**
 
-[![CI](https://github.com/CheerSaltman/traffic-console/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/CheerSaltman/traffic-console/actions/workflows/ci.yml)
+[![CI](https://github.com/CheerSaltman/loadloom/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/CheerSaltman/loadloom/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](rust-toolchain.toml)
 [![Tauri v2](https://img.shields.io/badge/Tauri-v2-24C8DB.svg)](https://tauri.app/)
 
-Traffic Console cleanly separates the generation of traffic from the user interface:
+LoadLoom cleanly separates the generation of traffic from the user interface:
 
-- **`traffic-core`** — a pure Rust library with **zero GUI dependencies**. It needs no window, no browser and no event loop, so it compiles, tests and runs inside CI, containers and headless servers.
+- **`loadloom-core`** — a pure Rust library with **zero GUI dependencies**. It needs no window, no browser and no event loop, so it compiles, tests and runs inside CI, containers and headless servers.
 - **`src-tauri`** — the native desktop shell (Tauri v2). It only bridges IPC; business logic lives elsewhere.
 - **`src`** — a React 19 frontend responsible for rendering and passing parameters down.
 
@@ -21,7 +21,7 @@ The contract between them has a **single source of truth plus a mechanical guard
 >
 > Use this tool **only** against systems you own or have explicit written authorization to test. Applying pressure to systems without permission may violate laws and terms of service.
 >
-> The app asks you to confirm authorization before traffic starts, and **refuses to start if it is not confirmed** (it returns a `rejected` event). Every request additionally carries a `_tc={worker_id}-{request_id}` parameter so the target's operators can identify and trace your traffic in their access logs.
+> The app asks you to confirm authorization before traffic starts, and **refuses to start if it is not confirmed** (it returns a `rejected` event). Every request additionally carries a `_ll={worker_id}-{request_id}` parameter so the target's operators can identify and trace your traffic in their access logs.
 
 ---
 
@@ -43,7 +43,7 @@ The contract between them has a **single source of truth plus a mechanical guard
 
 | Capability | Description |
 | --- | --- |
-| **Headless core** | `traffic-core`'s dependency closure contains no GUI or rendering library, and it runs real traffic in a windowless environment |
+| **Headless core** | `loadloom-core`'s dependency closure contains no GUI or rendering library, and it runs real traffic in a windowless environment |
 | **Concurrency ramp** | 1–32 workers; **dragging the slider while a run is active takes effect immediately**, no restart needed |
 | **Global rate limit** | Token bucket; `0` means unlimited, capped at 4096 MiB/s, adjustable mid-run |
 | **Auto-stop** | A byte threshold (GB) and a duration threshold (minutes) apply independently; `0` disables either one |
@@ -59,13 +59,13 @@ The contract between them has a **single source of truth plus a mechanical guard
 
 ### Option 1: download an installer (recommended)
 
-Grab one of the three assets from [Releases](https://github.com/CheerSaltman/traffic-console/releases/latest):
+Grab one of the three assets from [Releases](https://github.com/CheerSaltman/loadloom/releases/latest):
 
 | File | Who it is for |
 | --- | --- |
-| `Traffic Console_0.3.0_x64-setup.exe` | **Most users.** NSIS installer with a Start Menu entry and an uninstaller |
-| `Traffic Console_0.3.0_x64_en-US.msi` | Enterprise deployment via Group Policy or silent install (`msiexec /i`) |
-| `traffic-console-desktop.exe` | Portable, no installation — just double-click |
+| `LoadLoom_0.4.0_x64-setup.exe` | **Most users.** NSIS installer with a Start Menu entry and an uninstaller |
+| `LoadLoom_0.4.0_x64_en-US.msi` | Enterprise deployment via Group Policy or silent install (`msiexec /i`) |
+| `loadloom-desktop.exe` | Portable, no installation — just double-click |
 
 > Requirements: Windows 10/11 x64 plus the **WebView2 Runtime** (bundled with Windows 11 and recent Windows 10 builds; if it is missing, install the [Evergreen Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) once).
 
@@ -79,15 +79,15 @@ See [Building from source](#building-from-source).
 
 ### 1. Launch
 
-Open **Traffic Console** from the Start Menu, or double-click `traffic-console-desktop.exe`.
-On first launch it creates its log directory: `%LOCALAPPDATA%\TrafficConsole\logs\traffic-console.log`.
+Open **LoadLoom** from the Start Menu, or double-click `loadloom-desktop.exe`.
+On first launch it creates its log directory: `%LOCALAPPDATA%\LoadLoom\logs\loadloom.log`.
 
 ### 2. Confirm you are authorized
 
 The UI has an **authorization checkbox**. It is not decorative:
 
 - Not checked → pressing **Start** makes the engine return a `rejected` event and no request is ever sent.
-- Checked → every request carries `_tc={worker_id}-{request_id}`, so the target's operators can recognize you in their access logs.
+- Checked → every request carries `_ll={worker_id}-{request_id}`, so the target's operators can recognize you in their access logs.
 
 ### 3. Fill in the target and parameters
 
@@ -128,12 +128,12 @@ While a run is active you can **change concurrency and rate limit on the fly** �
 
 ## Tutorial: use it as a library (headless)
 
-`traffic-core` does not assume the calling thread has a Tokio runtime context. It captures a runtime handle at construction time (reusing an existing one, or creating its own), so you can **start traffic from any thread** — including a bare `main` thread with no runtime.
+`loadloom-core` does not assume the calling thread has a Tokio runtime context. It captures a runtime handle at construction time (reusing an existing one, or creating its own), so you can **start traffic from any thread** — including a bare `main` thread with no runtime.
 
 The smallest runnable example ships with the repo:
 
 ```bash
-cargo run --locked --example headless_smoke -p traffic-core
+cargo run --locked --example headless_smoke -p loadloom-core
 ```
 
 ```text
@@ -148,7 +148,7 @@ That example lives in `examples/`, which means `cargo test` compiles it every ti
 Regression testing in CI, containers or headless servers is just as direct:
 
 ```bash
-cargo test --locked -p traffic-core     # 18 tests, no graphical environment required
+cargo test --locked -p loadloom-core     # 18 tests, no graphical environment required
 ```
 
 ---
@@ -168,7 +168,7 @@ cargo test --locked -p traffic-core     # 18 tests, no graphical environment req
 └───────────────────────────┬──────────────────────────────┘
                             │  Rust function calls (same process)
 ┌───────────────────────────┴──────────────────────────────┐
-│  crates/traffic-core/   headless engine (zero GUI deps)   │
+│  crates/loadloom-core/   headless engine (zero GUI deps)   │
 │    contract.rs   single source of truth for the contract  │
 │    engine.rs     rate limiter / workers / metrics / ticks  │
 └──────────────────────────────────────────────────────────┘
@@ -178,7 +178,7 @@ cargo test --locked -p traffic-core     # 18 tests, no graphical environment req
 
 1. **Testability.** Once a GUI leaks into the business layer, testing requires a window and an event loop. Today the core logic is `cargo test` in CI: 18 tests, seconds, no display, parallelizable. `headless_e2e.rs` can even run real traffic on a **bare thread with no Tokio runtime** — and that is exactly the regression test for the original crash bug.
 
-2. **Replaceability.** The shell and the frontend are disposable. Want a CLI, a web service, or a daemon on a server instead? Rewrite the shell — `traffic-core` does not change by a single line.
+2. **Replaceability.** The shell and the frontend are disposable. Want a CLI, a web service, or a daemon on a server instead? Rewrite the shell — `loadloom-core` does not change by a single line.
 
 3. **Verifiable constraints.** Requirements like "no browser form factor" and "no GUI pollution" silently decay after a few iterations if they rely on human memory. Once layered, they become **assertions a machine can check**: the process listens on no ports (`scripts/verify_launch.ps1`), and the core dependency closure contains no GUI library (`scripts/audit_residue.ps1`).
 
@@ -188,7 +188,7 @@ Responsibilities and dependency direction:
 
 | Layer | Responsibility | Must not do |
 | --- | --- | --- |
-| `traffic-core` | Traffic generation, rate limiting, metrics, contract definition | No windows, no IPC, no frontend types |
+| `loadloom-core` | Traffic generation, rate limiting, metrics, contract definition | No windows, no IPC, no frontend types |
 | `src-tauri` | IPC bridging, tray, window lifecycle, log persistence | No business rules, no data processing |
 | `src` | Rendering, interaction, parameter submission | No polling, no guessing field names, no hard-coded contract |
 
@@ -234,14 +234,14 @@ A contract test failure looks like this:
 **Prerequisites**: Rust (the toolchain version is pinned by `rust-toolchain.toml`), Node.js ≥ 20, and the WebView2 Runtime on Windows.
 
 ```bash
-git clone https://github.com/CheerSaltman/traffic-console.git
-cd traffic-console
+git clone https://github.com/CheerSaltman/loadloom.git
+cd loadloom
 
 npm install
 npm run typecheck          # tsc --noEmit, should print nothing
 npm run build              # emits the frontend into dist/
 
-cargo test --locked -p traffic-core   # 18 tests, no graphical environment needed
+cargo test --locked -p loadloom-core   # 18 tests, no graphical environment needed
 npm run desktop:dev        # development: hot-reloading native window
 npm run desktop:build      # packaging: produces exe + NSIS + MSI
 ```
@@ -249,9 +249,9 @@ npm run desktop:build      # packaging: produces exe + NSIS + MSI
 Build outputs:
 
 ```text
-target/release/traffic-console-desktop.exe                       ← portable executable
-target/release/bundle/nsis/Traffic Console_0.3.0_x64-setup.exe   ← NSIS installer
-target/release/bundle/msi/Traffic Console_0.3.0_x64_en-US.msi    ← MSI installer
+target/release/loadloom-desktop.exe                       ← portable executable
+target/release/bundle/nsis/LoadLoom_0.4.0_x64-setup.exe   ← NSIS installer
+target/release/bundle/msi/LoadLoom_0.4.0_x64_en-US.msi    ← MSI installer
 ```
 
 Development workflow, quality gates and the release procedure live in [docs/development.md](docs/development.md) (in Chinese).
@@ -261,8 +261,8 @@ Development workflow, quality gates and the release procedure live in [docs/deve
 ## Project structure
 
 ```text
-traffic-console/
-├── crates/traffic-core/          # headless engine (library)
+loadloom/
+├── crates/loadloom-core/          # headless engine (library)
 │   ├── src/
 │   │   ├── lib.rs                # the only public entry point
 │   │   ├── engine.rs             # the engine itself

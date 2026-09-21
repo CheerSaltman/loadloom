@@ -3,7 +3,7 @@
 //! 默认 `#[ignore]`，需要显式运行：
 //!
 //! ```text
-//! cargo test -p traffic-core --test throughput -- --ignored --nocapture
+//! cargo test -p loadloom-core --test throughput -- --ignored --nocapture
 //! ```
 //!
 //! 它会连续跑多组并发并占满 CPU 数秒，所以不进默认测试集（默认集必须又快又稳）。
@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use traffic_core::{Engine, StartRunRequest};
+use loadloom_core::{Engine, StartRunRequest};
 
 /// 单次响应体大小。刻意取 256 KiB：既不是小包（避免被每请求固定开销主导），
 /// 也不是大包（避免请求数太少、压不出并发调度的差异）。

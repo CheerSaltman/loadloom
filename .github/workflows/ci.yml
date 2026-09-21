@@ -37,9 +37,9 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: clippy
-        run: cargo clippy --locked -p traffic-core --all-targets -- -D warnings
+        run: cargo clippy --locked -p loadloom-core --all-targets -- -D warnings
       - name: test
-        run: cargo test --locked -p traffic-core
+        run: cargo test --locked -p loadloom-core
 
   # 前端：类型检查 + 打包。
   web:
@@ -73,4 +73,4 @@ jobs:
       - name: 前端产物（tauri 编译期需要 dist/ 存在）
         run: npm run build
       - name: 编译桌面壳
-        run: cargo check --locked -p traffic-console-desktop
+        run: cargo check --locked -p loadloom-desktop

@@ -94,10 +94,10 @@ export default function App() {
       {/* ---------------- 侧边栏 ---------------- */}
       <aside className="flex w-[236px] shrink-0 flex-col border-r border-line bg-surface-2 px-4 py-5">
         <div className="flex items-center gap-3">
-          <span className={cn("size-3 rounded-full bg-accent shadow-[0_0_14px_var(--accent)]", running && "tc-live-dot")} />
+          <span className={cn("size-3 rounded-full bg-accent shadow-[0_0_14px_var(--accent)]", running && "ll-live-dot")} />
           <div>
-            <div className="text-[15px] font-bold leading-tight">打流控制台</div>
-            <div className="text-[10.5px] tracking-[1.6px] text-muted">TRAFFIC CONSOLE</div>
+            <div className="text-[15px] font-bold leading-tight">LoadLoom</div>
+            <div className="text-[10.5px] tracking-[1.6px] text-muted">打流控制台</div>
           </div>
         </div>
 
@@ -135,7 +135,7 @@ export default function App() {
           <h1 className="text-[17px] font-bold">高并发打流控制台</h1>
           <div className="ml-auto flex flex-wrap items-center gap-2">
             <Pill tone={connection === "live" ? "border-good/40 bg-good/10 text-good" : "border-bad/40 bg-bad/10 text-bad"}>
-              <i className={cn("size-2 rounded-full bg-current", connection === "live" && "tc-live-dot")} />
+              <i className={cn("size-2 rounded-full bg-current", connection === "live" && "ll-live-dot")} />
               {connection === "live" ? "推送链路已连接" : connection === "connecting" ? "连接中…" : "链路断开"}
             </Pill>
             <Pill tone={running ? "border-good/40 bg-good/10 text-good" : "border-line bg-surface text-muted"}>

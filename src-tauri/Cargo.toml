@@ -1,12 +1,12 @@
 [package]
-name = "traffic-console-desktop"
+name = "loadloom-desktop"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Traffic Console desktop shell (Tauri v2). Thin IPC bridge only — all business logic lives in traffic-core."
+description = "LoadLoom desktop shell (Tauri v2). Thin IPC bridge only — all business logic lives in loadloom-core."
 # 桌面应用，不发布到 crates.io。
 publish = false
 
@@ -16,14 +16,14 @@ workspace = true
 [lib]
 # 与 bin target 同名会触发 `output filename collision` 警告（bin/lib 的 .pdb 同名），
 # 这里加 `_lib` 后缀区分；bin 名仍由 package.name 决定。
-name = "traffic_console_desktop_lib"
+name = "loadloom_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-traffic-core = { path = "../crates/traffic-core" }
+loadloom-core = { path = "../crates/loadloom-core" }
 tauri = { version = "2", features = ["tray-icon"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

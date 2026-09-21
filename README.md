@@ -1,17 +1,17 @@
-# Traffic Console
+# LoadLoom
 
 **授权压力测试控制台 —— 无头计算核心 + 原生桌面外壳**
 
 **简体中文** | [English](README.en.md)
 
-[![CI](https://github.com/CheerSaltman/traffic-console/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/CheerSaltman/traffic-console/actions/workflows/ci.yml)
+[![CI](https://github.com/CheerSaltman/loadloom/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/CheerSaltman/loadloom/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](rust-toolchain.toml)
 [![Tauri v2](https://img.shields.io/badge/Tauri-v2-24C8DB.svg)](https://tauri.app/)
 
-Traffic Console 把"打流计算"和"界面"彻底拆开：
+LoadLoom 把"打流计算"和"界面"彻底拆开：
 
-- **`traffic-core`** —— 纯 Rust 库，**零 GUI 依赖**。不依赖窗口、浏览器、事件循环，可以在 CI、容器、无头服务器里编译、测试、运行。
+- **`loadloom-core`** —— 纯 Rust 库，**零 GUI 依赖**。不依赖窗口、浏览器、事件循环，可以在 CI、容器、无头服务器里编译、测试、运行。
 - **`src-tauri`** —— 原生桌面外壳（Tauri v2），只做 IPC 桥接，业务逻辑为零。
 - **`src`** —— React 19 前端，只做展示与参数下发。
 
@@ -22,7 +22,7 @@ Traffic Console 把"打流计算"和"界面"彻底拆开：
 > 本工具只能用于**你拥有、或已获得目标方明确书面授权**的系统。未授权对他方系统施压可能违反法律与服务条款。
 >
 > 程序在启动打流前会要求勾选授权确认，**未勾选则引擎直接拒绝启动**（返回 `rejected` 事件）。此外，每个请求都会附带
-> `_tc={worker_id}-{request_id}` 参数，方便目标方在访问日志中识别并溯源本次测试流量。
+> `_ll={worker_id}-{request_id}` 参数，方便目标方在访问日志中识别并溯源本次测试流量。
 
 ---
 
@@ -44,7 +44,7 @@ Traffic Console 把"打流计算"和"界面"彻底拆开：
 
 | 能力 | 说明 |
 | --- | --- |
-| **无头核心** | `traffic-core` 依赖闭包内没有任何 GUI / 渲染库，可在无窗口环境完整跑通真实打流 |
+| **无头核心** | `loadloom-core` 依赖闭包内没有任何 GUI / 渲染库，可在无窗口环境完整跑通真实打流 |
 | **并发梯度** | 1–32 个 worker，**运行中拖动滑块即时生效**，无需停止重来 |
 | **全局限速** | 令牌桶，`0` 表示不限速，上限 4096 MiB/s，运行中可调 |
 | **自动停止** | 流量阈值（GB）与时长阈值（分钟）各自独立生效，填 `0` 表示该项关闭 |
@@ -60,13 +60,13 @@ Traffic Console 把"打流计算"和"界面"彻底拆开：
 
 ### 方式一：直接下载安装包（推荐）
 
-到 [Releases](https://github.com/CheerSaltman/traffic-console/releases/latest) 下载，三选一：
+到 [Releases](https://github.com/CheerSaltman/loadloom/releases/latest) 下载，三选一：
 
 | 文件 | 适合谁 |
 | --- | --- |
-| `Traffic Console_0.3.0_x64-setup.exe` | **大多数用户**。NSIS 安装包，带开始菜单项与卸载程序 |
-| `Traffic Console_0.3.0_x64_en-US.msi` | 需要走企业组策略 / 静默部署（`msiexec /i`）的场景 |
-| `traffic-console-desktop.exe` | 免安装绿色版，双击就跑 |
+| `LoadLoom_0.4.0_x64-setup.exe` | **大多数用户**。NSIS 安装包，带开始菜单项与卸载程序 |
+| `LoadLoom_0.4.0_x64_en-US.msi` | 需要走企业组策略 / 静默部署（`msiexec /i`）的场景 |
+| `loadloom-desktop.exe` | 免安装绿色版，双击就跑 |
 
 > 系统要求：Windows 10/11 x64，需要 **WebView2 Runtime**（Windows 11 与较新的 Windows 10 已自带；若提示缺失，装一次 [Evergreen Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) 即可）。
 
@@ -80,15 +80,15 @@ Traffic Console 把"打流计算"和"界面"彻底拆开：
 
 ### 1. 启动
 
-安装后从开始菜单打开 **Traffic Console**，或直接双击 `traffic-console-desktop.exe`。
-首次启动会创建日志目录：`%LOCALAPPDATA%\TrafficConsole\logs\traffic-console.log`。
+安装后从开始菜单打开 **LoadLoom**，或直接双击 `loadloom-desktop.exe`。
+首次启动会创建日志目录：`%LOCALAPPDATA%\LoadLoom\logs\loadloom.log`。
 
 ### 2. 确认你已获得授权
 
 界面上有一项**授权确认勾选**。这一项不是装饰：
 
 - 不勾选 → 点「开始」时引擎返回 `rejected` 事件，不会发出任何请求。
-- 勾选后，发出的每个请求都会带上 `_tc={worker_id}-{request_id}`，对方运维可在访问日志里认出你。
+- 勾选后，发出的每个请求都会带上 `_ll={worker_id}-{request_id}`，对方运维可在访问日志里认出你。
 
 ### 3. 填写目标与参数
 
@@ -129,12 +129,12 @@ Traffic Console 把"打流计算"和"界面"彻底拆开：
 
 ## 教程：把它当库用（无头模式）
 
-`traffic-core` 不假设调用方线程处于 Tokio 运行时上下文中 —— 它会在构造时固化运行时句柄（有则复用、无则自建），所以你可以**从任意线程**启动打流，包括没有运行时的裸 `main` 线程。
+`loadloom-core` 不假设调用方线程处于 Tokio 运行时上下文中 —— 它会在构造时固化运行时句柄（有则复用、无则自建），所以你可以**从任意线程**启动打流，包括没有运行时的裸 `main` 线程。
 
 最小可运行示例就在仓库里：
 
 ```bash
-cargo run --locked --example headless_smoke -p traffic-core
+cargo run --locked --example headless_smoke -p loadloom-core
 ```
 
 ```text
@@ -149,7 +149,7 @@ cargo run --locked --example headless_smoke -p traffic-core
 在 CI、容器或无头服务器上做回归也很直接：
 
 ```bash
-cargo test --locked -p traffic-core     # 18 个测试，全程不需要图形环境
+cargo test --locked -p loadloom-core     # 18 个测试，全程不需要图形环境
 ```
 
 ---
@@ -169,7 +169,7 @@ cargo test --locked -p traffic-core     # 18 个测试，全程不需要图形�
 └───────────────────────────┬──────────────────────────────┘
                             │  Rust 函数调用（同进程）
 ┌───────────────────────────┴──────────────────────────────┐
-│  crates/traffic-core/   无头引擎（零 GUI 依赖）            │
+│  crates/loadloom-core/   无头引擎（零 GUI 依赖）            │
 │    contract.rs   通信契约单一事实来源                       │
 │    engine.rs     限速器 / worker / 指标 / tick / 自动停止   │
 └──────────────────────────────────────────────────────────┘
@@ -180,7 +180,7 @@ cargo test --locked -p traffic-core     # 18 个测试，全程不需要图形�
 1. **可测试性**：GUI 一旦混进业务层，测试就得跑起窗口和事件循环。现在核心逻辑在 CI 里
    是 `cargo test`，秒级、无界面、可并行。
 2. **可替换性**：外壳与前端都是可替换的。想换成 CLI、Web 服务或个人机上的守护进程，
-   只需重写外壳 —— `traffic-core` 一行不动。
+   只需重写外壳 —— `loadloom-core` 一行不动。
 3. **约束可验证**：「禁止浏览器形态」「不许有 GUI 污染」这类要求如果不能被自动检查，
    就会在几次迭代后悄悄失效。分层之后，这两条都能用测试和依赖扫描守住。
 
@@ -188,7 +188,7 @@ cargo test --locked -p traffic-core     # 18 个测试，全程不需要图形�
 
 | 层 | 职责 | 不该做的事 |
 | --- | --- | --- |
-| `traffic-core` | 打流计算、限速、指标、契约定义 | 不碰窗口、不碰 IPC、不碰前端类型 |
+| `loadloom-core` | 打流计算、限速、指标、契约定义 | 不碰窗口、不碰 IPC、不碰前端类型 |
 | `src-tauri` | IPC 桥接、托盘、窗口生命周期、日志落盘 | 不写业务规则，不做数据加工 |
 | `src` | 渲染、交互、参数下发 | 不轮询、不猜字段、不硬编码契约 |
 
@@ -234,14 +234,14 @@ cargo test --locked -p traffic-core     # 18 个测试，全程不需要图形�
 **前置**：Rust（工具链版本由 `rust-toolchain.toml` 固定）、Node.js ≥ 20、Windows 上需 WebView2 Runtime。
 
 ```bash
-git clone https://github.com/CheerSaltman/traffic-console.git
-cd traffic-console
+git clone https://github.com/CheerSaltman/loadloom.git
+cd loadloom
 
 npm install
 npm run typecheck          # tsc --noEmit，应该零输出
 npm run build              # 产出前端 dist/
 
-cargo test --locked -p traffic-core   # 18 个测试，无需图形环境
+cargo test --locked -p loadloom-core   # 18 个测试，无需图形环境
 npm run desktop:dev        # 开发模式：热重载原生窗口
 npm run desktop:build      # 打包：产出 exe + NSIS + MSI
 ```
@@ -249,9 +249,9 @@ npm run desktop:build      # 打包：产出 exe + NSIS + MSI
 打包产物：
 
 ```text
-target/release/traffic-console-desktop.exe                       ← 免安装可执行文件
-target/release/bundle/nsis/Traffic Console_0.3.0_x64-setup.exe   ← NSIS 安装包
-target/release/bundle/msi/Traffic Console_0.3.0_x64_en-US.msi    ← MSI 安装包
+target/release/loadloom-desktop.exe                       ← 免安装可执行文件
+target/release/bundle/nsis/LoadLoom_0.4.0_x64-setup.exe   ← NSIS 安装包
+target/release/bundle/msi/LoadLoom_0.4.0_x64_en-US.msi    ← MSI 安装包
 ```
 
 开发流程、质量门禁与发布步骤见 [docs/development.md](docs/development.md)。
@@ -261,8 +261,8 @@ target/release/bundle/msi/Traffic Console_0.3.0_x64_en-US.msi    ← MSI 安装�
 ## 项目结构
 
 ```text
-traffic-console/
-├── crates/traffic-core/          # 无头引擎（library）
+loadloom/
+├── crates/loadloom-core/          # 无头引擎（library）
 │   ├── src/
 │   │   ├── lib.rs                # 唯一对外出口
 │   │   ├── engine.rs             # 打流引擎本体

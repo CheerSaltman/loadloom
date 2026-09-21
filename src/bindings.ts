@@ -1,7 +1,7 @@
 /**
- * ⚠️ 契约镜像文件 —— 与 `crates/traffic-core/src/contract.rs` **逐字段对齐**。
+ * ⚠️ 契约镜像文件 —— 与 `crates/loadloom-core/src/contract.rs` **逐字段对齐**。
  *
- * 单一事实来源是 Rust 端；本文件由契约测试 `cargo test -p traffic-core --test contract_wire`
+ * 单一事实来源是 Rust 端；本文件由契约测试 `cargo test -p loadloom-core --test contract_wire`
  * 守护（该测试逐字段断言 JSON 线格式，字段一旦漂移即失败）。
  * 若后续引入 `tauri-specta`，仅需用自动生成结果覆盖本文件，调用侧代码零改动。
  */
@@ -75,7 +75,7 @@ export interface MetricsSnapshot {
 
 export type LogLevel = "info" | "warn" | "error";
 
-/** Event `traffic://log` 载荷。 */
+/** Event `loadloom://log` 载荷。 */
 export interface LogEntry {
   level: LogLevel;
   message: string;
@@ -84,7 +84,7 @@ export interface LogEntry {
 
 export type RunEventKind = "started" | "stopped" | "autoStopped" | "rejected";
 
-/** Event `traffic://run-event` 载荷。 */
+/** Event `loadloom://run-event` 载荷。 */
 export interface RunEvent {
   kind: RunEventKind;
   message: string;
@@ -115,8 +115,8 @@ export function describeCoreError(error: unknown): string {
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-export const EVENT_LOG = "traffic://log";
-export const EVENT_RUN = "traffic://run-event";
+export const EVENT_LOG = "loadloom://log";
+export const EVENT_RUN = "loadloom://run-event";
 
 /** 请求-响应型 IPC。全部具备完整类型推断。 */
 export const commands = {
