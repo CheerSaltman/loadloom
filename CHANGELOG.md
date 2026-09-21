@@ -3,21 +3,31 @@
 本文件格式遵循 [Keep a Changelog 1.1.0](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本 2.0.0](https://semver.org/lang/zh-CN/)。
 
+## 计划中
+
+（尚未发布的改动会先记在这里，发版时移到对应版本号下。）
+
+- tauri-specta 发布稳定版后，用自动生成的类型替换手写的 `src/bindings.ts`
+  （调用侧零改动，见 `docs/architecture.md`）。
+- 把 `crates/loadloom-core/benches/throughput.rs` 升级为 criterion 基准，
+  并接入历史基线对比。
+
 ## [0.4.0] - 2026-09-22
+
+品牌更名版：项目由 **Traffic Console** 正式更名为 **LoadLoom**（`loom` 取「织机」之意——
+把多个 worker 织成一股流量）。
 
 ### 变更（破坏性）
 
-- 项目正式更名为 **LoadLoom**。旧名 Traffic Console 出现在安装标识、日志路径、IPC 事件名与
-  请求溯源参数里，因此这次改名是破坏性变更，需要重新安装（旧版本不会自动升级到新 bundle id）：
-  - crate `traffic-core` → `loadloom-core`；桌面包 `traffic-console-desktop` → `loadloom-desktop`
-  - bundle id `com.agentic.trafficconsole` → `com.agentic.loadloom`；产物名 `LoadLoom_<版本>_x64-setup.exe`
-  - Release 产物统一命名：`LoadLoom_<版本>_x64-setup.exe`（NSIS 安装包）、`LoadLoom_<版本>_x64_en-US.msi`（MSI）、
-    `LoadLoom_<版本>_x64-portable.exe`（免安装版；本地构建产物仍为 `target/release/loadloom-desktop.exe`，上传时改名）
-  - 日志目录 `%LOCALAPPDATA%\TrafficConsole\logs` → `%LOCALAPPDATA%\LoadLoom\logs\loadloom.log`
-  - IPC 事件 `traffic://log` / `traffic://run-event` → `loadloom://log` / `loadloom://run-event`
-  - 请求溯源参数 `_tc=` → `_ll=`；User-Agent `loadloom/0.4 (+authorized-load-test)`
-  - npm 包名 `traffic-console` → `loadloom`；CSS 类前缀 `tc-` → `ll-`
-- 版本号 0.3.0 → 0.4.0（上述破坏性改名）。
+- **下载产物全部改名**，Release 资产统一为 `LoadLoom_<版本>_x64-*`：
+  - `LoadLoom_0.4.0_x64-setup.exe` —— NSIS 安装包，推荐大多数用户使用
+  - `LoadLoom_0.4.0_x64_en-US.msi` —— 静默部署（`msiexec /i`）
+  - `LoadLoom_0.4.0_x64-portable.exe` —— 免安装绿色版
+- **需要重新安装**：应用标识由 `com.agentic.trafficconsole` 改为 `com.agentic.loadloom`，
+  安装包的升级标识随之改变，旧版本不会被自动覆盖或卸载——请先卸载旧版再装新版。
+- **日志目录迁移**：`%LOCALAPPDATA%\TrafficConsole\logs` → `%LOCALAPPDATA%\LoadLoom\logs\loadloom.log`
+  （旧目录不再写入，可自行删除）。
+- 窗口标题与界面品牌统一为「LoadLoom · 高并发打流控制台」。
 
 ### 新增
 
@@ -36,12 +46,13 @@
 - 新增英文版 `README.en.md`，与中文版结构一一对应、顶部互相链接；两份需同步维护。
 - 修正 `docs/conventions.md` 中的工具链记录（`1.98.1` → `stable`）。
 
-### 计划中
+### 开发者注意（内部标识符迁移）
 
-- tauri-specta 发布稳定版后，用自动生成的类型替换手写的 `src/bindings.ts`
-  （调用侧零改动，见 `docs/architecture.md`）。
-- 把 `crates/loadloom-core/benches/throughput.rs` 升级为 criterion 基准，
-  并接入历史基线对比。
+- crate `traffic-core` → `loadloom-core`；桌面壳包 `traffic-console-desktop` → `loadloom-desktop`
+- 请求溯源参数 `_tc=` → `_ll=`；User-Agent → `loadloom/0.4 (+authorized-load-test)`
+- IPC 事件 `traffic://log` / `traffic://run-event` → `loadloom://log` / `loadloom://run-event`
+- npm 包名 `traffic-console` → `loadloom`；CSS 类前缀 `tc-` → `ll-`
+- 本地构建产物路径不变（仍是 `target/release/loadloom-desktop.exe`），仅上传到 Release 时改名
 
 ## [0.3.0] - 2026-09-21
 
@@ -68,7 +79,7 @@
   此后从任意线程派发后台任务都安全。
 - **不限速路径上的全局锁**：`RateLimiter::acquire` 对每个数据块都要抢一次互斥锁，
   即使不限速也如此；现用 `rate_bits` 原子镜像做零锁快路径。
-- **运行时析构 panic**：自建 Tokio 运行时被它自己的 worker 线程 drop 时 panic
+- **运行析构 panic**：自建 Tokio 运行时被它自己的 worker 线程 drop 时 panic
   （`Cannot drop a runtime in a context where blocking is not allowed`）；
   改为 `OwnedRuntime` 包装，把释放动作挪到裸线程。
 - 修正 release profile：`panic = "abort"` → `unwind`，`strip` → `debug = "line-tables-only"`，
@@ -76,8 +87,9 @@
 
 ### 移除
 
-- egui / eframe / webbrowser / axum 等一切历史 GUI 或本地服务遗留。
-- 界面上的技术标签（引擎/壳/推流说明），用户不关心这些内部细节。
+- 历史遗留的 GUI 与本地服务依赖（egui / eframe / webbrowser / axum）：
+  仓库不再包含任何界面渲染框架或内置 HTTP 服务代码。
+- 界面上的技术标签（引擎 / 壳 / 推流说明）：不把实现细节暴露给使用者。
 
-[0.4.0]: https://github.com/CheerSaltman/loadloom/compare/712308638d0c14afd44958e47f735c39b8dfb812...v0.4.0
+[0.4.0]: https://github.com/CheerSaltman/loadloom/releases/tag/v0.4.0
 [0.3.0]: https://github.com/CheerSaltman/loadloom/commit/712308638d0c14afd44958e47f735c39b8dfb812
