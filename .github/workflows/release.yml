@@ -1,0 +1,61 @@
+name: Release
+
+# 推 tag 即发布：构建 Windows 产物并挂到同名 Release 上。
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build & publish (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 cargo 构建产物
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: 安装前端依赖
+        run: npm ci
+
+      - name: 质量门禁
+        run: |
+          cargo test --locked -p traffic-core
+          npm run typecheck
+
+      - name: 构建原生安装包
+        run: npm run desktop:build
+
+      - name: 上传产物到 Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          # Release 不存在则创建；已存在则只补产物，不覆盖说明。
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" \
+                 --title "Traffic Console $GITHUB_REF_NAME" \
+                 --notes "本次变更见 CHANGELOG.md。"
+
+          gh release upload "$GITHUB_REF_NAME" \
+            "target/release/traffic-console-desktop.exe" \
+            "target/release/bundle/nsis/Traffic Console_${VERSION}_x64-setup.exe" \
+            "target/release/bundle/msi/Traffic Console_${VERSION}_x64_en-US.msi" \
+            --clobber
