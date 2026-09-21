@@ -298,7 +298,7 @@ loadloom/
 | [docs/development.md](docs/development.md) | 开发环境、质量门禁、本机验收与发布流程 |
 | [docs/conventions.md](docs/conventions.md) | 仓库规范对照表（每条都能指回官方文档） |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 如何提交 issue / PR |
-| [SECURITY.md](SECURITY.md) | 漏洞报告与密钥泄露处置流程 |
+| [SECURITY.md](SECURITY.md) | 漏洞报告流程 |
 | [CHANGELOG.md](CHANGELOG.md) | 版本变更记录（Keep a Changelog 格式） |
 
 ---

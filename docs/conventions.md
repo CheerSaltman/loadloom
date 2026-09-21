@@ -15,7 +15,7 @@
 | 换行与二进制归属 | Git · gitattributes | `.gitattributes`（文本 LF、图标与安装包标 binary） |
 | 变更记录 | Keep a Changelog 1.1.0 + SemVer 2.0.0 | `CHANGELOG.md` |
 | 贡献流程 | GitHub · 社区健康文件 | `CONTRIBUTING.md` |
-| 漏洞报告 | GitHub · Security policy | `SECURITY.md`（含密钥泄露处置流程） |
+| 漏洞报告 | GitHub · Security policy | `SECURITY.md` |
 | 许可声明 | SPDX 标识 + Cargo `license` | `LICENSE`（MIT）+ `license.workspace = true` |
 | 持续集成 | GitHub Actions 文档 | `.github/workflows/ci.yml` |
 | 依赖更新 | Dependabot 配置文档 | `.github/dependabot.yml`（cargo ×2 + npm + actions） |

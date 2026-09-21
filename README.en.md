@@ -298,7 +298,7 @@ loadloom/
 | [docs/development.md](docs/development.md) | Development environment, quality gates, local acceptance and the release procedure |
 | [docs/conventions.md](docs/conventions.md) | Repository conventions, each traced back to official documentation |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to file issues and pull requests |
-| [SECURITY.md](SECURITY.md) | Vulnerability reporting and secret-leak handling |
+| [SECURITY.md](SECURITY.md) | How to report a vulnerability |
 | [CHANGELOG.md](CHANGELOG.md) | Release history (Keep a Changelog format) |
 
 > The `docs/` directory is currently written in Chinese only. Pull requests that translate it are welcome.
