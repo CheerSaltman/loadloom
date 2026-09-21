@@ -12,7 +12,7 @@
 //! * 全局令牌桶限速，速率可运行中动态修改；
 //! * 指标采集固定 250ms 一 tick，与 UI 帧率完全解耦。
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -21,9 +21,11 @@ use futures_util::StreamExt;
 use tokio::sync::broadcast;
 
 use crate::contract::{
-    CoreError, EngineLimits, ErrorCount, HistoryPoint, LiveConfigPatch, LogEntry, LogLevel,
-    MetricsSnapshot, RunEvent, RunEventKind, RunPhase, StartRunRequest,
+    CoreError, EngineLimits, HistoryPoint, LiveConfigPatch, LogEntry, LogLevel, MetricsSnapshot,
+    RunEvent, RunEventKind, RunPhase, StartRunRequest,
 };
+use crate::metrics::Metrics;
+use crate::rate::RateLimiter;
 
 /// 允许的最大并发连接数（同时创建的 worker 任务数）。
 pub const MAX_WORKERS: u32 = 32;
@@ -110,210 +112,6 @@ fn classify(error: &reqwest::Error) -> String {
         "REQUEST_ERROR".to_owned()
     } else {
         "UNKNOWN".to_owned()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 限速器
-// ---------------------------------------------------------------------------
-
-struct Bucket {
-    rate: f64,
-    tokens: f64,
-    capacity: f64,
-    last: Instant,
-}
-
-impl Bucket {
-    fn refill(&mut self) {
-        let now = Instant::now();
-        let elapsed = now.duration_since(self.last).as_secs_f64();
-        self.last = now;
-        if self.rate > 0.0 {
-            self.tokens = (self.tokens + self.rate * elapsed).min(self.capacity);
-        }
-    }
-}
-
-/// 全局令牌桶：速率在所有 worker 之间共享。
-pub struct RateLimiter {
-    inner: Mutex<Bucket>,
-    /// `rate` 的原子镜像（f64 位模式），让**不限速**路径可以完全免锁。
-    rate_bits: AtomicU64,
-}
-
-impl RateLimiter {
-    pub fn new() -> Self {
-        Self {
-            inner: Mutex::new(Bucket {
-                rate: 0.0,
-                tokens: 0.0,
-                capacity: 256.0 * 1024.0,
-                last: Instant::now(),
-            }),
-            rate_bits: AtomicU64::new(0),
-        }
-    }
-
-    /// 动态设置速率（byte/s），`<= 0` 表示不限速。
-    pub fn set_rate(&self, rate: f64) {
-        let mut bucket = self.inner.lock().unwrap_or_else(|error| error.into_inner());
-        bucket.refill();
-        bucket.rate = if rate > 0.0 { rate } else { 0.0 };
-        bucket.capacity = (bucket.rate * 0.05).max(128.0 * 1024.0);
-        bucket.tokens = bucket.tokens.min(bucket.capacity);
-        self.rate_bits
-            .store(bucket.rate.to_bits(), Ordering::Release);
-    }
-
-    /// 消费指定字节数的令牌，必要时异步等待（不阻塞线程）。
-    pub async fn acquire(&self, bytes: usize) {
-        // ---- 快路径：不限速时直接返回，完全不加锁 ----
-        //
-        // 这是压测下的绝对热路径：`worker` 对**每一个**数据块都要调用一次
-        // （典型 8~64KB 一块），100 MB/s 就是每秒数千次调用。原实现即使
-        // `rate == 0` 也要先抢一次全局 `Mutex`，于是 32 个 worker 被一把锁
-        // 人为串行化 —— 这正是「要开 8 线程才顶得上原来 4 线程」的元凶之一。
-        //
-        // 现在用原子镜像做前置判断：不限速时零锁、零等待、零唤醒。
-        if f64::from_bits(self.rate_bits.load(Ordering::Acquire)) <= 0.0 {
-            return;
-        }
-        loop {
-            let wait = {
-                let mut bucket = self.inner.lock().unwrap_or_else(|error| error.into_inner());
-                bucket.refill();
-                if bucket.rate <= 0.0 {
-                    return;
-                }
-                let need = bytes as f64;
-                if bucket.tokens >= need {
-                    bucket.tokens -= need;
-                    return;
-                }
-                let deficit = need - bucket.tokens;
-                bucket.tokens = 0.0;
-                Duration::from_secs_f64(deficit / bucket.rate)
-            };
-            tokio::time::sleep(wait.max(Duration::from_micros(200))).await;
-        }
-    }
-}
-
-impl Default for RateLimiter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 指标
-// ---------------------------------------------------------------------------
-
-#[derive(Default)]
-struct JitterState {
-    last: Option<f64>,
-    jitter: f64,
-}
-
-#[derive(Default)]
-struct Metrics {
-    bytes: AtomicU64,
-    completed: AtomicU64,
-    failures: AtomicU64,
-    in_flight: AtomicU32,
-    latency_us: AtomicU64,
-    jitter_us: AtomicU64,
-    errors: Mutex<BTreeMap<String, u64>>,
-    last_error: Mutex<String>,
-    jitter: Mutex<JitterState>,
-}
-
-impl Metrics {
-    fn reset(&self) {
-        self.bytes.store(0, Ordering::Relaxed);
-        self.completed.store(0, Ordering::Relaxed);
-        self.failures.store(0, Ordering::Relaxed);
-        self.in_flight.store(0, Ordering::Relaxed);
-        self.latency_us.store(0, Ordering::Relaxed);
-        self.jitter_us.store(0, Ordering::Relaxed);
-        if let Ok(mut errors) = self.errors.lock() {
-            errors.clear();
-        }
-        if let Ok(mut last) = self.last_error.lock() {
-            last.clear();
-        }
-        if let Ok(mut jitter) = self.jitter.lock() {
-            *jitter = JitterState::default();
-        }
-    }
-
-    /// 记录一次首包时延，并按 RFC3550 递推抖动。
-    fn record_latency(&self, millis: f64) {
-        self.latency_us
-            .store((millis * 1000.0) as u64, Ordering::Relaxed);
-        let mut state = self
-            .jitter
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if let Some(previous) = state.last {
-            let deviation = (millis - previous).abs();
-            state.jitter += (deviation - state.jitter) / 16.0;
-        }
-        state.last = Some(millis);
-        self.jitter_us
-            .store((state.jitter * 1000.0) as u64, Ordering::Relaxed);
-    }
-
-    fn add_error(&self, code: &str, message: String) {
-        let mut errors = self
-            .errors
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        *errors.entry(code.to_owned()).or_insert(0) += 1;
-        drop(errors);
-        let mut last = self
-            .last_error
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        *last = message;
-    }
-
-    fn latency_ms(&self) -> f64 {
-        self.latency_us.load(Ordering::Relaxed) as f64 / 1000.0
-    }
-
-    fn jitter_ms(&self) -> f64 {
-        self.jitter_us.load(Ordering::Relaxed) as f64 / 1000.0
-    }
-
-    fn error_snapshot(&self) -> Vec<ErrorCount> {
-        let errors = self
-            .errors
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let mut items: Vec<ErrorCount> = errors
-            .iter()
-            .map(|(code, count)| ErrorCount {
-                code: code.clone(),
-                count: *count,
-            })
-            .collect();
-        items.sort_by(|left, right| {
-            right
-                .count
-                .cmp(&left.count)
-                .then_with(|| left.code.cmp(&right.code))
-        });
-        items.truncate(12);
-        items
-    }
-
-    fn last_error(&self) -> String {
-        self.last_error
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone()
     }
 }
 

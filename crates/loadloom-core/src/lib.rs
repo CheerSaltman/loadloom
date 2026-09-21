@@ -11,6 +11,8 @@
 
 pub mod contract;
 pub mod engine;
+mod metrics;
+mod rate;
 
 pub use contract::{
     CoreError, EngineLimits, ErrorCount, HistoryPoint, LiveConfigPatch, LogEntry, LogLevel,

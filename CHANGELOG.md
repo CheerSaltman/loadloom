@@ -8,6 +8,13 @@
 - 待 `tauri-specta` 发布稳定版后，用生成的类型替换手写的 `src/bindings.ts`。
 - 将 `crates/loadloom-core/benches/throughput.rs` 升级为 criterion 基准，并接入历史基线对比。
 
+## [0.4.1] - 2026-09-22
+
+### 重构
+
+- 拆分 `loadloom-core` 的 `engine.rs`（998 行）为三个职责单一的模块：`rate.rs`（令牌桶限速器）、`metrics.rs`（指标与抖动统计）、`engine.rs`（引擎门面）。纯搬移，**无行为变更**，18 个测试全部保持通过。
+- 新增模块的对外可见性统一收敛为 `pub(crate)`，收紧 crate 公共 API 面。
+
 ## [0.4.0] - 2026-09-22
 
 项目更名为 LoadLoom（原 Traffic Console）。
@@ -60,5 +67,6 @@
 - 历史遗留的 GUI 与本地服务依赖（egui / eframe / webbrowser / axum）。
 - 界面上的技术标签。
 
+[0.4.1]: https://github.com/CheerSaltman/loadloom/releases/tag/v0.4.1
 [0.4.0]: https://github.com/CheerSaltman/loadloom/releases/tag/v0.4.0
 [0.3.0]: https://github.com/CheerSaltman/loadloom/commit/712308638d0c14afd44958e47f735c39b8dfb812
