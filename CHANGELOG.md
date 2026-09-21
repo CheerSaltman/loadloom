@@ -5,6 +5,23 @@
 
 ## [未发布]
 
+### 新增
+
+- `.github/workflows/release.yml`：推送 `v*` tag 时自动运行质量门禁、构建 exe + NSIS + MSI
+  并上传到同名 Release（只补产物，不覆盖 Release 说明）。
+
+### 变更
+
+- README 中桌面壳 Command 数量由 7 更正为 9，与实际 `#[tauri::command]` 数量对齐。
+
+### 文档
+
+- README 重写为面向使用者的「介绍 + 教程 + 结构拆解」；原先堆在 README 里的本机性内容归位：
+  规范对照表移到 `docs/conventions.md`，质量门禁、本机验收、发布流程与构建注意事项移到
+  `docs/development.md`。
+- 新增英文版 `README.en.md`，与中文版结构一一对应、顶部互相链接；两份需同步维护。
+- 修正 `docs/conventions.md` 中的工具链记录（`1.98.1` → `stable`）。
+
 ### 计划中
 
 - tauri-specta 发布稳定版后，用自动生成的类型替换手写的 `src/bindings.ts`

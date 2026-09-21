@@ -2,6 +2,8 @@
 
 **授权压力测试控制台 —— 无头计算核心 + 原生桌面外壳**
 
+**简体中文** | [English](README.en.md)
+
 [![CI](https://github.com/CheerSaltman/traffic-console/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/CheerSaltman/traffic-console/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](rust-toolchain.toml)
@@ -163,7 +165,7 @@ cargo test --locked -p traffic-core     # 18 个测试，全程不需要图形�
                             │  Tauri IPC（Channel / Event / Command）
 ┌───────────────────────────┴──────────────────────────────┐
 │  src-tauri/      原生外壳（薄壳，业务为零）                │
-│    7 个 Command、托盘、窗口生命周期、日志落盘               │
+│    9 个 Command、托盘、窗口生命周期、日志落盘               │
 └───────────────────────────┬──────────────────────────────┘
                             │  Rust 函数调用（同进程）
 ┌───────────────────────────┴──────────────────────────────┐
