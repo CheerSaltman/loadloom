@@ -78,6 +78,27 @@ Tokio 会 panic。`OwnedRuntime` 把真正的释放动作挪到一条裸线程�
 配套 `get_log_path` / `open_log_dir` 两个命令。
 release profile 因此保留 `panic = "unwind"` 与 `debug = "line-tables-only"`。
 
+### 7. 信任边界在核心层，不在前端
+
+`start_run` / `set_live_config` 是 IPC Command，调用方可以是任意前端代码或调试工具，
+因此前端校验只算用户体验，**不作数**。所有校验都在 `loadloom-core` 里完成：
+
+- 非法值（`NaN`、非有限数）→ 明确拒绝，并通过日志与 `run_event` 广播原因；
+- 超范围但语义合法的值 → 收敛到范围内，且如实告知被收敛过；
+- 任何情况下都不 panic —— 畸形载荷最多让本次请求失败。
+
+细节见 `docs/threat-model.md`。
+
+### 8. worker 只认「运行代次」
+
+一次运行里的 worker 只认同一个代次（`Control::run`）。`start()` 与 `stop()` 各自让
+代次递增一次，worker 在每次循环与每片退避等待后都校验它。
+
+这样做的原因是一个真实竞态：如果循环条件只看 `stop` 标志，那么「停止 → 立即开始」
+时，一个正在退避睡眠里的旧 worker 会错过那次 stop（醒来时标志已被 `start()` 清成
+false），于是作为**额外的** worker 继续打流 —— 实际并发突破用户授权值，流量也继续
+打向一个已经叫停的目标。
+
 ## 目录约定
 
 ```

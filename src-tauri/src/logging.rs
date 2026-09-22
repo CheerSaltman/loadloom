@@ -20,6 +20,9 @@
 //! * **永不 panic**：日志设施自身失败（磁盘满、权限不足、互斥锁中毒）绝不能反过来
 //!   拖垮应用 —— 那正是它最该派上用场的时刻。落盘失败就降级为「只上屏」，不中断启动。
 //! * **不撒谎**：界面拿到的日志路径必须是**真正在写**的那一个；退回临时目录时也要如实反映。
+//! * **不让内容越权**：日志正文可能来自远端（错误文本、响应片段），其中的换行与
+//!   控制字符会被编码（见 `sanitize`），否则攻击者可以伪造出额外的日志行
+//!   （CWE-117 日志注入），让「运行日志」页与磁盘日志都出现由他编排的记录。
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -96,6 +99,36 @@ fn level_label(level: LogLevel) -> &'static str {
 /// 组装一整行（含结尾换行）。落盘与上屏共用同一份文本，避免两处格式各自漂移。
 fn format_line(at: SystemTime, level: LogLevel, message: &str) -> String {
     format!("{} [{}] {}\n", timestamp(at), level_label(level), message)
+}
+
+/// 单条日志正文的字符上限。超出部分截断 —— 消息可能来自远端响应或错误文本，
+/// 不该由它决定一行日志能有多大。
+const MAX_MESSAGE_CHARS: usize = 2_000;
+
+/// 把控制字符编码成可见转义，并截断超长消息。
+///
+/// 这是**输出编码**：日志正文来自进程外部（远端错误文本、服务器响应片段），
+/// 直接落盘等于把「能否伪造日志行」的决定权交给对端 —— 一个带 `\n` 的错误信息
+/// 就能在 `loadloom.log` 与界面「运行日志」里插入一行看似正常的记录
+/// （日志注入，CWE-117）。这里把换行 / 回车 / 制表符换成 `\n` `\r` `\t` 字面量，
+/// 其余控制字符换成 `\u{XXXX}`，保证**一条消息永远只占一行**。
+fn sanitize(message: &str) -> String {
+    let mut out = String::with_capacity(message.len().min(MAX_MESSAGE_CHARS));
+    for character in message.chars().take(MAX_MESSAGE_CHARS) {
+        match character {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ if character.is_control() => {
+                out.push_str(&format!("\\u{{{:04X}}}", character as u32));
+            }
+            _ => out.push(character),
+        }
+    }
+    if message.chars().count() > MAX_MESSAGE_CHARS {
+        out.push('…');
+    }
+    out
 }
 
 /// `YYYY-MM-DD HH:MM:SS.mmmZ`（UTC）。
@@ -277,7 +310,9 @@ fn note(message: &str) {
 /// 永不 panic：日志设施自身失败（磁盘满、权限不足、互斥锁中毒）绝不能
 /// 反过来拖垮应用 —— 那正是它在故障时最该派上用场的时刻。
 pub(crate) fn write(level: LogLevel, message: &str) {
-    let line = format_line(SystemTime::now(), level, message);
+    // 唯一写文件 / 上屏的出口，因此编码也放在这里：任何调用方都不可能绕过
+    // （包括 panic hook 里那段可能夹杂远端文本的消息）。
+    let line = format_line(SystemTime::now(), level, &sanitize(message));
 
     if let Some(mut sink) = sink() {
         sink.write_line(&line);
@@ -376,6 +411,35 @@ mod tests {
         assert_eq!(timestamp(at(1_709_164_800, 0)), "2024-02-29 00:00:00.000Z");
         // 世纪闰年规则里「能被 400 整除才是闰年」的另一侧。
         assert_eq!(timestamp(at(951_868_800, 0)), "2000-03-01 00:00:00.000Z");
+    }
+
+    #[test]
+    fn control_characters_cannot_forge_extra_log_lines() {
+        // 回归点（CWE-117）：远端错误文本里带换行时，必须被编码成字面量，
+        // 否则攻击者可以在日志里插入一行伪装成其它级别的记录。
+        assert_eq!(
+            sanitize("请求失败：boom\n2026-01-01 00:00:00.000Z [ERROR] 伪造的崩溃"),
+            "请求失败：boom\\n2026-01-01 00:00:00.000Z [ERROR] 伪造的崩溃"
+        );
+        assert_eq!(sanitize("a\r\nb"), "a\\r\\nb");
+        assert_eq!(sanitize("tab\there"), "tab\\there");
+        assert_eq!(sanitize("bell\u{7}"), "bell\\u{0007}");
+        // 正常文本原样通过，中日文与 emoji 不受影响。
+        assert_eq!(sanitize("正常 one two 🚀"), "正常 one two 🚀");
+    }
+
+    #[test]
+    fn an_overlong_message_is_truncated_to_one_bounded_line() {
+        let huge = "x".repeat(MAX_MESSAGE_CHARS * 3);
+        let sanitized = sanitize(&huge);
+        assert_eq!(sanitized.chars().count(), MAX_MESSAGE_CHARS + 1);
+        assert!(sanitized.ends_with('…'));
+        assert!(!sanitized.contains('\n'));
+
+        // 每条日志行（含时间戳与级别）仍然只占一行。
+        let line = format_line(at(0, 0), LogLevel::Error, &sanitize("boom\nboom"));
+        assert_eq!(line.matches('\n').count(), 1);
+        assert!(line.ends_with("boom\\nboom\n"));
     }
 
     #[test]

@@ -2,6 +2,7 @@
 //!
 //! 证明「剥离后的后端模块在无界面环境下可直接运行测试」这一硬性约束。
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -169,10 +170,12 @@ fn streams_real_traffic_without_any_ui() {
         );
 
         // 运行中动态调整：限速 + 并发
-        engine.set_live(LiveConfigPatch {
-            threads: Some(4),
-            rate_mib: Some(1.0),
-        });
+        engine
+            .set_live(LiveConfigPatch {
+                threads: Some(4),
+                rate_mib: Some(1.0),
+            })
+            .expect("合法的动态调整不应失败");
         tokio::time::sleep(Duration::from_millis(300)).await;
         let live = engine.snapshot(false);
         assert_eq!(live.threads, 4);
@@ -187,6 +190,103 @@ fn streams_real_traffic_without_any_ui() {
         // 握手快照携带历史曲线，且不超过环形上限。
         let handshake = engine.snapshot(true);
         assert!(handshake.history.len() <= loadloom_core::Engine::limits().history_len as usize);
+    });
+}
+
+/// 一个必定回 `HTTP 500` 的本地 origin，并统计**被接受的连接数**。
+///
+/// 为什么要数连接：判断「已经被停止的那一代 worker 是否还在打这个地址」时，
+/// 字节数与失败次数都会被 `metrics.reset()` 抹掉或串味（上一代在途请求的收尾
+/// 会落在新一轮的计数里），只有对端的连接计数是无法被掩盖的证据。
+async fn spawn_failing_origin() -> (u16, Arc<AtomicU64>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("绑定本地端口");
+    let port = listener.local_addr().expect("读取本地地址").port();
+    let accepted = Arc::new(AtomicU64::new(0));
+    let counter = Arc::clone(&accepted);
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            counter.fetch_add(1, Ordering::Relaxed);
+            tokio::spawn(async move {
+                let mut scratch = [0u8; 2048];
+                let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut scratch).await;
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await;
+                let _ = socket.flush().await;
+            });
+        }
+    });
+
+    (port, accepted)
+}
+
+/// 回归点：`stop()` 之后立刻 `start()`，**上一代 worker 不得继续产生流量**。
+///
+/// 旧实现里 worker 的循环条件只看 `stop` 标志，而 `start()` 会把它清成 false ——
+/// 一个正在**退避睡眠**里的旧 worker 就这样「复活」，继续按上一轮的地址打流：
+/// 实际并发超过用户授权值，而且流量会持续打向一个用户已经叫停的目标。
+///
+/// 为了让「正在退避」成为确定性状态而不是靠运气撞上，前几轮刻意指向一个
+/// 必定回 500 的 origin：请求立刻失败 → worker 必然进入数百毫秒的退避，
+/// 而停止点（120ms）正好落在退避窗口内。判定依据是该 origin 的**连接计数**
+/// 在停止之后不再增长。
+#[test]
+fn a_stopped_generation_stops_generating_traffic() {
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    runtime.block_on(async {
+        let port = spawn_local_origin(16 * 1024).await;
+        let target = format!("http://127.0.0.1:{port}/blob");
+        let (stale_port, stale_connections) = spawn_failing_origin().await;
+        let stale = format!("http://127.0.0.1:{stale_port}/blob");
+        let engine: Arc<Engine> = Engine::spawn();
+
+        for round in 0..4 {
+            engine
+                .start(request(stale.clone(), true))
+                .unwrap_or_else(|error| panic!("第 {round} 轮启动失败：{error}"));
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            engine.stop("轮次结束");
+        }
+
+        // 前置条件：前几轮确实打到了这个 origin，否则本测试没有意义。
+        let baseline = stale_connections.load(Ordering::Relaxed);
+        assert!(baseline > 0, "前置条件失败：前几轮应当真的连过旧 origin");
+
+        // 末轮指向健康 origin：此后**任何**对旧 origin 的新连接都只可能来自
+        // 上一代侥幸复活的 worker。
+        engine.start(request(target, true)).expect("末轮启动成功");
+        let ceiling = engine.snapshot(false).threads;
+        assert!(ceiling > 0);
+
+        let deadline = Instant::now() + Duration::from_millis(2_500);
+        let mut saw_bytes = false;
+        while Instant::now() < deadline {
+            let frame = engine.snapshot(false);
+            assert!(
+                frame.in_flight <= ceiling,
+                "在途 {} 超过授权的并发 {ceiling}：旧代次的 worker 还在打流",
+                frame.in_flight
+            );
+            assert_eq!(
+                stale_connections.load(Ordering::Relaxed),
+                baseline,
+                "已停止的那一代 worker 仍在访问旧 origin（连接数继续增长）"
+            );
+            saw_bytes |= frame.total_bytes > 0;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(saw_bytes, "末轮的新代次应当真实产生流量");
+
+        engine.stop("回归测试结束");
+        assert_eq!(engine.snapshot(false).phase, RunPhase::Idle);
     });
 }
 

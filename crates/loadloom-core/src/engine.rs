@@ -13,6 +13,19 @@
 //! * 一次性拉起 `MAX_WORKERS` 个异步 worker，靠 `AtomicU32` 实时增减「在岗」并发；
 //! * 全局令牌桶限速，速率可运行中动态修改；
 //! * 指标采集固定 250ms 一 tick，与 UI 帧率完全解耦。
+//!
+//! ## 信任边界
+//!
+//! 本模块的每个数字都可能来自 IPC 载荷（`start_run` / `set_live_config` 是
+//! Command，调用方可以是任意前端代码或调试工具），因此一律按**不可信输入**处理：
+//!
+//! * 明确的非法值（`NaN`、非有限数）→ 拒绝，并通过日志与 `run_event` 广播原因；
+//! * 超出安全范围但语义合法的值 → 收敛到范围内，且**如实告知**被收敛过
+//!   （绝不静默修改用户设定的并发、限速与安全停止边界）；
+//! * 任何情况下都不 panic：畸形载荷最多让本次请求失败，不允许掀翻进程。
+//!
+//! 运行期另有两条硬约束：worker 只认同一个**运行代次**（见 [`Control`]），
+//! 退避等待有界且可被 `stop()` 打断。
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -42,6 +55,33 @@ const GIB: f64 = 1_073_741_824.0;
 const MIB: f64 = 1_048_576.0;
 const DEFAULT_THREADS: u32 = 4;
 
+/// 自动停止「流量上限」的硬上限（GB，1 PiB）。
+///
+/// 必须保证 `MAX_LIMIT_GB * GIB` 仍在 `u64` 字节计数可表达的范围内：否则
+/// `total_bytes as f64 >= limit_gb * GIB` 的右侧会溢出成 `inf`，比较永远为假 ——
+/// 用户以为设了安全停止，实际是把守卫静默关掉，流量会一直打到手动叫停。
+const MAX_LIMIT_GB: f64 = 1024.0 * 1024.0;
+/// 自动停止「时长上限」的硬上限（分钟，约 1 年）。
+const MAX_LIMIT_MINUTES: f64 = 365.0 * 24.0 * 60.0;
+/// 连接超时。
+///
+/// 与 [`READ_TIMEOUT`] 一起构成「请求不会无限挂起」的硬保证，任何降级路径
+/// 都必须保留它们（见 [`build_client`]）。
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// 读空闲超时：两个数据块之间允许的最长间隔。
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// 失败退避基数与上限。
+const BACKOFF_BASE_MS: u64 = 400;
+const BACKOFF_MAX_MS: u64 = 3_200;
+/// 退避的分片粒度：每片结束后重新校验运行代次，让 `stop()` 不必等满整个退避。
+const BACKOFF_SLICE: Duration = Duration::from_millis(100);
+/// `User-Agent`。版本号取自包元数据，避免手写字面量随版本漂移（旧值恒为 `0.4`）。
+const USER_AGENT: &str = concat!(
+    "loadloom/",
+    env!("CARGO_PKG_VERSION"),
+    " (+authorized-load-test)"
+);
+
 /// MiB/s -> byte/s
 #[inline]
 pub fn mib_to_bps(mib: f64) -> f64 {
@@ -53,6 +93,10 @@ pub fn mib_to_bps(mib: f64) -> f64 {
 // ---------------------------------------------------------------------------
 
 /// 追加缓存破坏参数，确保每个请求都真实穿透到源站。
+///
+/// 分隔符处理三种收尾：`?` / `&` 结尾直接接着写（否则会出现 `?&_ll=` 这种
+/// 空参数），已有查询串用 `&`，其余用 `?`。参数名固定为 `_ll`，同时充当
+/// 「本次流量来自 LoadLoom」的溯源标记。
 pub fn cache_busted_url(url: &str, worker_id: u32, request_id: u64) -> String {
     let (base, fragment) = url.split_once('#').unwrap_or((url, ""));
     let suffix = if fragment.is_empty() {
@@ -60,21 +104,59 @@ pub fn cache_busted_url(url: &str, worker_id: u32, request_id: u64) -> String {
     } else {
         format!("#{fragment}")
     };
-    let separator = if base.contains('?') { "&" } else { "?" };
+    let separator = if base.ends_with('?') || base.ends_with('&') {
+        ""
+    } else if base.contains('?') {
+        "&"
+    } else {
+        "?"
+    };
     format!("{base}{separator}_ll={worker_id}-{request_id}{suffix}")
 }
 
+/// 校验并收敛限速值（MiB/s）。
+///
+/// **必须显式拒绝 `NaN`**：`f64::clamp` 会原样返回 `NaN`，而 `NaN > 0.0` 为假，
+/// 令牌桶于是把它当作「不限速」—— 用户设了限速、实际全速放行，这是最危险的
+/// 失效方向（对第三方产生远超授权的流量）。`1e-300` 这类极小正值语义合法，
+/// 交给限速器按有界等待处理（见 `rate` 模块的 `MAX_WAIT`）。
+fn sanitize_rate_mib(rate_mib: f64) -> Result<f64, CoreError> {
+    if !rate_mib.is_finite() {
+        return Err(CoreError::InvalidInput("限速值必须是有限数字".to_owned()));
+    }
+    Ok(rate_mib.clamp(0.0, MAX_RATE_MIB))
+}
+
+/// 校验并收敛自动停止阈值（`<= 0` 表示关闭）。
+///
+/// 不能只做 `max(0.0)`：`NaN.max(0.0)` 返回 `0.0`，而 `0` 在契约里的含义是
+/// 「关闭自动停止」—— 一个畸形载荷就这样把用户的安全守卫静默关掉了。
+/// 大到溢出的阈值同样致命（见 [`MAX_LIMIT_GB`]），因此按硬上限收敛。
+fn sanitize_limit(value: f64, ceiling: f64, label: &str) -> Result<f64, CoreError> {
+    if !value.is_finite() {
+        return Err(CoreError::InvalidInput(format!("{label}必须是有限数字")));
+    }
+    if value <= 0.0 {
+        return Ok(0.0);
+    }
+    Ok(value.min(ceiling))
+}
+
 /// 自动停止判定：返回 `Some(原因)` 表示应当停止。
+///
+/// 非有限阈值一律视为「未设置」：`NaN` 参与任何比较都为假，若不加判断，
+/// 一个 `NaN` 上限会让条件永远为假 —— 守卫看起来在、实际永远不触发。
+/// 阈值本身的可达性由 [`sanitize_limit`] 在信任边界上保证。
 pub fn decide_auto_stop(
     limit_gb: f64,
     limit_minutes: f64,
     total_bytes: u64,
     elapsed_secs: f64,
 ) -> Option<String> {
-    if limit_gb > 0.0 && total_bytes as f64 >= limit_gb * GIB {
+    if limit_gb.is_finite() && limit_gb > 0.0 && total_bytes as f64 >= limit_gb * GIB {
         return Some(format!("已达流量目标 {limit_gb:.2} GB，自动停止"));
     }
-    if limit_minutes > 0.0 && elapsed_secs >= limit_minutes * 60.0 {
+    if limit_minutes.is_finite() && limit_minutes > 0.0 && elapsed_secs >= limit_minutes * 60.0 {
         return Some(format!("已达时长目标 {limit_minutes:.1} 分钟，自动停止"));
     }
     None
@@ -123,8 +205,36 @@ fn classify(error: &reqwest::Error) -> String {
 
 #[derive(Default)]
 struct Control {
+    /// 停止标志：worker 在热路径上高频读取，因此单独一个原子量。
     stop: AtomicBool,
+    /// 目标并发数（在岗 worker 数）。
     threads: AtomicU32,
+    /// 运行代次（run identity）：每 `start()` 与 `stop()` 各递增一次。
+    ///
+    /// **为什么必须有它（真实竞态）**：worker 的循环条件原本只看 `stop`。
+    /// 「stop → 立刻 start」时，一个正在 400ms 退避里休眠的旧 worker 会错过
+    /// 那次 stop（醒来时 `stop` 已被 start 清成 false），于是作为**第 33 个**
+    /// worker 继续打流：既突破了用户授权的并发上限，也会在 `metrics.reset()`
+    /// 之后用一个迟到的 `in_flight` 收尾把在途计数下溢成 `u32::MAX`。
+    /// 有了代次，旧 worker 在下一次判定时就发现自己已经过期。
+    run: AtomicU64,
+}
+
+impl Control {
+    /// 开始新一轮运行：递增代次并返回本轮标识。
+    fn begin_run(&self) -> u64 {
+        self.run.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    /// 让当前轮次作废（`stop()` 使用）。
+    fn invalidate_run(&self) {
+        self.run.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// worker 是否仍属于当前轮次、且未被要求停止。
+    fn is_active(&self, run: u64) -> bool {
+        !self.stop.load(Ordering::Acquire) && self.run.load(Ordering::Acquire) == run
+    }
 }
 
 struct Inner {
@@ -266,7 +376,16 @@ pub struct Engine {
     control: Arc<Control>,
     metrics: Arc<Metrics>,
     limiter: Arc<RateLimiter>,
-    client: reqwest::Client,
+    /// `None` = 连「只保留超时约束」的最小客户端都构造不出来。此时引擎仍然
+    /// 可以构造与订阅，但 `start()` 会明确拒绝，而不是拿一个没有超时的客户端
+    /// 去裸奔（见 `build_client`）。
+    client: Option<reqwest::Client>,
+    /// 客户端降级原因，留到第一次 `start()` 再播报。
+    ///
+    /// 不能在 `Engine::spawn()` 里播：广播通道此时还没有订阅者（桌面壳是在
+    /// spawn 之后才订阅日志流的），`broadcast::Sender::send` 会直接丢弃它 ——
+    /// 一条"已降级"的告警就此消失，正是本模块最反对的静默。
+    client_note: Mutex<Option<String>>,
     inner: Mutex<Inner>,
     epoch: Instant,
     seq: AtomicU64,
@@ -294,12 +413,14 @@ impl Engine {
         let (metrics_tx, _) = broadcast::channel(64);
         let (log_tx, _) = broadcast::channel(256);
         let (event_tx, _) = broadcast::channel(64);
+        let (client, client_note) = build_client();
         let engine = Arc::new(Engine {
             ex: Executor::acquire(),
             control: Arc::new(Control::default()),
             metrics: Arc::new(Metrics::default()),
             limiter: Arc::new(RateLimiter::new()),
-            client: build_client(),
+            client,
+            client_note: Mutex::new(client_note),
             inner: Mutex::new(Inner::idle()),
             epoch: Instant::now(),
             seq: AtomicU64::new(0),
@@ -372,7 +493,11 @@ impl Engine {
         self.inner.lock().unwrap_or_else(|error| error.into_inner())
     }
 
-    /// 启动打流。所有入参校验都在此完成（对齐旧版业务规则，无行为变更）。
+    /// 启动打流。所有入参校验都在此完成 —— 这里是**信任边界**。
+    ///
+    /// `start_run` 是 IPC Command，载荷可以来自任意前端代码或调试工具，
+    /// 因此每个数字都按不可信输入处理：非法值明确拒绝，超范围值收敛后再如实
+    /// 告知（见模块头的「信任边界」小节）。
     pub fn start(self: &Arc<Self>, request: StartRunRequest) -> Result<(), CoreError> {
         let url = request.url.trim().to_owned();
         if url.is_empty() {
@@ -388,13 +513,44 @@ impl Engine {
                 "请先确认：你拥有目标地址及其网络路径的明确测试授权".to_owned(),
             )));
         }
+        if self.client.is_none() {
+            return Err(self.reject(CoreError::Internal(
+                "HTTP 客户端不可用，无法发起请求".to_owned(),
+            )));
+        }
+        // 降级原因留到这里播报：此时前端一定在监听日志流（见字段注释）。
+        self.announce_client_degradation();
+
         let threads = request.threads.clamp(1, MAX_WORKERS);
-        let rate_mib = request.rate_mib.clamp(0.0, MAX_RATE_MIB);
+        let rate_mib = self.checked(sanitize_rate_mib(request.rate_mib))?;
+        let limit_gb = self.checked(sanitize_limit(request.limit_gb, MAX_LIMIT_GB, "流量上限"))?;
+        let limit_minutes = self.checked(sanitize_limit(
+            request.limit_minutes,
+            MAX_LIMIT_MINUTES,
+            "时长上限",
+        ))?;
+
+        // 被收敛过就必须说清楚：限速值与安全停止边界是用户对第三方的承诺，
+        // 静默修改等于让用户以为约束生效了。
+        for (requested, applied, label) in [
+            (request.limit_gb, limit_gb, "流量上限"),
+            (request.limit_minutes, limit_minutes, "时长上限"),
+            (request.rate_mib, rate_mib, "限速值"),
+        ] {
+            if applied != requested {
+                self.log(
+                    LogLevel::Warn,
+                    format!("{label}已按引擎允许范围收敛：请求 {requested:e} → 实际 {applied:.3}"),
+                );
+            }
+        }
 
         // 将“是否已运行”的检查和状态切换放在同一把锁内。Tauri command 可以并发
         // 调用，原先在这里分两次取锁会让两个 start 都观察到 Idle，继而各自拉起一组
         // worker。先标记 Running 后再释放锁，保证同一时刻只有一个调用能赢得启动权。
-        {
+        //
+        // 块的值是本轮运行代次，供下面的 worker 派发使用。
+        let run = {
             let mut inner = self.inner_lock();
             if inner.running {
                 drop(inner);
@@ -405,6 +561,9 @@ impl Engine {
 
             self.metrics.reset();
             self.control.stop.store(false, Ordering::Release);
+            // 代次在清掉 stop 之后递增：旧代次的 worker 即使醒来看到
+            // `stop == false`，也会因为代次不匹配而退出，不会复活成多余并发。
+            let run = self.control.begin_run();
             self.control.threads.store(threads, Ordering::Release);
             self.limiter.set_rate(mib_to_bps(rate_mib));
 
@@ -414,8 +573,8 @@ impl Engine {
             inner.elapsed_frozen = 0.0;
             inner.threads = threads;
             inner.rate_mib = rate_mib;
-            inner.limit_gb = request.limit_gb.max(0.0);
-            inner.limit_minutes = request.limit_minutes.max(0.0);
+            inner.limit_gb = limit_gb;
+            inner.limit_minutes = limit_minutes;
             inner.status = "测试运行中 · 并发与限速可实时调整".to_owned();
             inner.history.clear();
             inner.speed_bps = 0.0;
@@ -424,13 +583,14 @@ impl Engine {
             inner.samples = 0;
             inner.last_bytes = 0;
             inner.last_tick = Instant::now();
-        }
+            run
+        };
 
         for index in 0..MAX_WORKERS {
             let engine = Arc::clone(self);
             let target = url.clone();
             self.ex
-                .spawn(async move { worker(index, engine, target).await });
+                .spawn(async move { worker(index, engine, target, run).await });
         }
 
         self.log(
@@ -451,9 +611,31 @@ impl Engine {
         error
     }
 
+    /// 校验失败的统一出口：先广播原因，再原样返回错误。
+    fn checked<T>(&self, result: Result<T, CoreError>) -> Result<T, CoreError> {
+        result.map_err(|error| self.reject(error))
+    }
+
+    /// 播报一次「HTTP 客户端已降级」，播过即清空。
+    ///
+    /// 幂等：第一次 `start()` 时前端必定已在监听，这条告警只该出现一次。
+    fn announce_client_degradation(&self) {
+        let note = self
+            .client_note
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(note) = note {
+            self.log(LogLevel::Warn, note);
+        }
+    }
+
     /// 停止打流（幂等）。
     pub fn stop(&self, reason: &str) {
         self.control.stop.store(true, Ordering::Release);
+        // 同时作废当前代次：worker 不必依赖 `stop` 标志本身 —— 该标志会被
+        // 紧随其后的 `start()` 清掉，只看它会让旧 worker 有机会「复活」。
+        self.control.invalidate_run();
         let mut inner = self.inner_lock();
         if inner.running {
             inner.elapsed_frozen = inner
@@ -471,22 +653,30 @@ impl Engine {
     }
 
     /// 运行中动态调整并发与限速。
-    pub fn set_live(&self, patch: LiveConfigPatch) {
+    ///
+    /// 返回 `Result` 而不是静默忽略：`set_live_config` 同样是 IPC Command，
+    /// 畸形载荷（`NaN`、超出范围的速率）必须让用户看见，而不是变成一次
+    /// 悄无声息的「限速被关掉」。校验在取锁之前完成，避免持锁做广播。
+    pub fn set_live(&self, patch: LiveConfigPatch) -> Result<(), CoreError> {
+        let rate_mib = match patch.rate_mib {
+            Some(value) => Some(self.checked(sanitize_rate_mib(value))?),
+            None => None,
+        };
+
         let mut inner = self.inner_lock();
         if let Some(value) = patch.threads {
             let value = value.clamp(1, MAX_WORKERS);
             inner.threads = value;
             self.control.threads.store(value, Ordering::Release);
         }
-        if let Some(value) = patch.rate_mib {
-            let value = value.clamp(0.0, MAX_RATE_MIB);
+        if let Some(value) = rate_mib {
             inner.rate_mib = value;
-            let bps = mib_to_bps(value);
-            self.limiter.set_rate(bps);
+            self.limiter.set_rate(mib_to_bps(value));
         }
         if inner.running {
             inner.status = "测试运行中 · 并发与限速可实时调整".to_owned();
         }
+        Ok(())
     }
 
     /// 当前是否正在打流。
@@ -604,23 +794,106 @@ fn rate_summary(rate_mib: f64) -> String {
 // worker
 // ---------------------------------------------------------------------------
 
-fn build_client() -> reqwest::Client {
-    let builder = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .read_timeout(Duration::from_secs(30))
+/// 构造 HTTP 客户端，返回客户端与「降级原因」。
+///
+/// 旧实现结尾是 `Err(_) => reqwest::Client::new()`，有两个问题：
+///
+/// 1. **静默 fail-open**：兜底客户端会把连接/读空闲超时一起丢掉，于是任何一个
+///    不回包的源站都能把 worker 永久挂死，用户只看到「卡住、字节不涨」；
+/// 2. `Client::new()` 自身在构建失败时会 **panic**，而它是在 `Engine::spawn()`
+///    里被调用的 —— 一个网络层问题可以变成启动即崩溃。
+///
+/// 现在先退到「只保留超时约束」的最小构建，并把降级原因交给调用方如实上报；
+/// 连最小构建都失败时返回 `None`，由 `start()` 明确拒绝，而不是拿一个没有超时
+/// 约束的客户端去裸奔。
+fn build_client() -> (Option<reqwest::Client>, Option<String>) {
+    let tuned = reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(READ_TIMEOUT)
         .pool_max_idle_per_host(MAX_WORKERS as usize)
         .pool_idle_timeout(Duration::from_secs(30))
         .tcp_nodelay(true)
-        .user_agent("loadloom/0.4 (+authorized-load-test)");
-    match builder.build() {
-        Ok(client) => client,
-        Err(_) => reqwest::Client::new(),
+        .user_agent(USER_AGENT)
+        .build();
+
+    match tuned {
+        Ok(client) => (Some(client), None),
+        Err(error) => {
+            let minimal = reqwest::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .read_timeout(READ_TIMEOUT)
+                .user_agent(USER_AGENT)
+                .build();
+            let reason = format!("HTTP 客户端未能按预期构建（{error}）");
+            match minimal {
+                Ok(client) => (
+                    Some(client),
+                    Some(format!("{reason}，已退到保留超时约束的最小配置")),
+                ),
+                Err(fallback) => (
+                    None,
+                    Some(format!(
+                        "{reason}；最小配置同样失败（{fallback}），本次会话无法发起请求"
+                    )),
+                ),
+            }
+        }
     }
 }
 
-async fn worker(index: u32, engine: Arc<Engine>, url: String) {
+/// 由种子派生的确定性伪随机数（splitmix64 的收尾混合）。
+///
+/// 刻意不引入 `rand`：退避抖动只需要「不同 worker 取到不同值」，
+/// 不需要密码学质量，也不值得为此扩大依赖树。
+fn jitter_ms(seed: u64, span: u64) -> u64 {
+    if span == 0 {
+        return 0;
+    }
+    let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    (z ^ (z >> 31)) % span
+}
+
+/// 失败退避：指数增长 + 按 worker 抖动，并把等待切成小片。
+///
+/// 固定 `sleep(400ms)` 有两个问题：32 个 worker 会踩着同一节拍一起重试
+/// （对已经不健康的源站形成惊群），以及 `stop()` 最坏要等满整个退避才生效。
+async fn backoff(engine: &Engine, run: u64, index: u32, failures: u32) {
+    let capped = BACKOFF_BASE_MS
+        .saturating_mul(1_u64 << failures.min(4))
+        .min(BACKOFF_MAX_MS);
+    let seed = u64::from(index)
+        .wrapping_mul(0x9E37_79B9)
+        .wrapping_add(u64::from(failures));
+    // 抖动落在 [capped/2, capped]，既错开重试时刻，又不让退避趋近于零。
+    let total = Duration::from_millis(capped - jitter_ms(seed, capped / 2 + 1));
+
+    let mut slept = Duration::ZERO;
+    while slept < total {
+        // 每片都重新校验代次：旧代次的 worker 在下一片就能退出，
+        // 不必睡满整个退避才发现自己已经过期。
+        if !engine.control.is_active(run) {
+            return;
+        }
+        let step = BACKOFF_SLICE.min(total - slept);
+        tokio::time::sleep(step).await;
+        slept += step;
+    }
+}
+
+/// 单个 worker 的请求循环。
+///
+/// `run` 是它所属的运行代次：任何一次 `start()` / `stop()` 都会让它作废，
+/// worker 随即退出。这是「实际并发不超过用户授权值」的硬保证。
+async fn worker(index: u32, engine: Arc<Engine>, url: String, run: u64) {
+    let Some(client) = engine.client.as_ref() else {
+        return;
+    };
     let mut request_id = 0_u64;
-    while !engine.control.stop.load(Ordering::Acquire) {
+    let mut consecutive_failures = 0_u32;
+
+    while engine.control.is_active(run) {
         let active = engine
             .control
             .threads
@@ -634,10 +907,9 @@ async fn worker(index: u32, engine: Arc<Engine>, url: String) {
         request_id = request_id.wrapping_add(1);
         let target = cache_busted_url(&url, index, request_id);
         let started = Instant::now();
-        engine.metrics.in_flight.fetch_add(1, Ordering::Relaxed);
+        engine.metrics.request_started();
 
-        let result = engine
-            .client
+        let result = client
             .get(&target)
             .header("Cache-Control", "no-cache, no-store, max-age=0")
             .header("Pragma", "no-cache")
@@ -649,15 +921,17 @@ async fn worker(index: u32, engine: Arc<Engine>, url: String) {
             Ok(response) => {
                 let status = response.status();
                 if !status.is_success() {
+                    consecutive_failures = consecutive_failures.saturating_add(1);
                     engine.metrics.failures.fetch_add(1, Ordering::Relaxed);
                     engine.metrics.add_error(
                         &format!("HTTP {}", status.as_u16()),
                         format!("服务器返回 HTTP {}", status.as_u16()),
                     );
-                    engine.metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
-                    tokio::time::sleep(Duration::from_millis(400)).await;
+                    engine.metrics.request_finished();
+                    backoff(&engine, run, index, consecutive_failures).await;
                     continue;
                 }
+                consecutive_failures = 0;
 
                 let mut stream = response.bytes_stream();
                 let mut waiting_first_chunk = true;
@@ -665,7 +939,7 @@ async fn worker(index: u32, engine: Arc<Engine>, url: String) {
                 let mut scaled_down = false;
 
                 while let Some(chunk) = stream.next().await {
-                    if engine.control.stop.load(Ordering::Acquire) {
+                    if !engine.control.is_active(run) {
                         healthy = false;
                         break;
                     }
@@ -714,22 +988,22 @@ async fn worker(index: u32, engine: Arc<Engine>, url: String) {
                 if healthy && !scaled_down {
                     engine.metrics.completed.fetch_add(1, Ordering::Relaxed);
                 }
-                engine.metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
+                engine.metrics.request_finished();
             }
             Err(error) => {
-                engine.metrics.in_flight.fetch_sub(1, Ordering::Relaxed);
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                engine.metrics.request_finished();
                 engine.metrics.failures.fetch_add(1, Ordering::Relaxed);
                 engine
                     .metrics
                     .add_error(&classify(&error), format!("请求失败：{error}"));
-                tokio::time::sleep(Duration::from_millis(400)).await;
+                backoff(&engine, run, index, consecutive_failures).await;
             }
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// 无头单元测试：不启动任何窗口 / 浏览器即可验证核心逻辑
+// ---------------------------------------------------------------------------// 无头单元测试：不启动任何窗口 / 浏览器即可验证核心逻辑
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -793,5 +1067,157 @@ mod tests {
         assert_eq!(limits.max_workers, MAX_WORKERS);
         assert_eq!(limits.history_len, HISTORY_LEN as u32);
         assert_eq!(limits.tick_ms, 250);
+    }
+
+    #[test]
+    fn cache_buster_handles_an_empty_query_string() {
+        assert_eq!(
+            cache_busted_url("https://example.test/file?", 0, 1),
+            "https://example.test/file?_ll=0-1"
+        );
+        assert_eq!(
+            cache_busted_url("https://example.test/file?a=1&", 0, 1),
+            "https://example.test/file?a=1&_ll=0-1"
+        );
+    }
+
+    #[test]
+    fn a_new_run_invalidates_the_previous_generation() {
+        let control = Control::default();
+        let first = control.begin_run();
+        assert!(control.is_active(first));
+
+        // stop：代次作废。
+        control.stop.store(true, Ordering::Release);
+        control.invalidate_run();
+        assert!(!control.is_active(first));
+
+        // 关键在于 stop 标志随后被下一轮 start 清掉 —— 只看标志的实现会让旧
+        // worker 在这里「复活」，变成第 33 个并发。
+        control.stop.store(false, Ordering::Release);
+        assert!(
+            !control.is_active(first),
+            "旧代次的 worker 不得因为 stop 被清掉而复活"
+        );
+
+        let second = control.begin_run();
+        assert_ne!(first, second);
+        assert!(
+            control.is_active(second),
+            "新代次的 worker 必须处于在岗状态"
+        );
+    }
+
+    #[test]
+    fn non_finite_rate_is_rejected_not_silently_unlimited() {
+        assert!(sanitize_rate_mib(f64::NAN).is_err());
+        assert!(sanitize_rate_mib(f64::INFINITY).is_err());
+        assert!(sanitize_rate_mib(f64::NEG_INFINITY).is_err());
+    }
+
+    #[test]
+    fn rate_is_clamped_but_tiny_positive_rates_survive() {
+        assert_eq!(sanitize_rate_mib(-1.0).unwrap(), 0.0);
+        assert_eq!(sanitize_rate_mib(0.0).unwrap(), 0.0);
+        // 1e-300 语义合法：限速器以有界等待处理，不得改写成「不限速」。
+        assert_eq!(sanitize_rate_mib(1e-300).unwrap(), 1e-300);
+        assert_eq!(
+            sanitize_rate_mib(MAX_RATE_MIB * 10.0).unwrap(),
+            MAX_RATE_MIB
+        );
+    }
+
+    #[test]
+    fn non_finite_stop_limits_are_rejected() {
+        assert!(sanitize_limit(f64::NAN, MAX_LIMIT_GB, "流量上限").is_err());
+        assert!(sanitize_limit(f64::INFINITY, MAX_LIMIT_GB, "流量上限").is_err());
+        assert!(sanitize_limit(f64::NAN, MAX_LIMIT_MINUTES, "时长上限").is_err());
+    }
+
+    #[test]
+    fn the_hard_stop_ceiling_is_always_reachable() {
+        // 关键不变量：上限乘上单位换算后仍落在 u64 字节计数可表达的范围内。
+        // 否则 `limit_gb * GIB` 溢出成 `inf`，比较永远为假 —— 用户以为设了
+        // 安全停止，实际是把守卫静默关掉。
+        assert!(
+            MAX_LIMIT_GB * GIB < u64::MAX as f64,
+            "流量上限换算后会溢出，自动停止将永远不触发"
+        );
+        // 时长上限换算成秒之后同样不得溢出成 inf，否则 `elapsed >= limit`
+        // 会永远为假。用函数返回值做断言，避免被常量折叠掉。
+        let ceiling_seconds = sanitize_limit(MAX_LIMIT_MINUTES, MAX_LIMIT_MINUTES, "时长上限")
+            .expect("上限本身必须合法")
+            * 60.0;
+        assert!(ceiling_seconds.is_finite());
+
+        assert_eq!(
+            sanitize_limit(f64::MAX, MAX_LIMIT_GB, "流量上限").unwrap(),
+            MAX_LIMIT_GB
+        );
+        assert_eq!(sanitize_limit(-5.0, MAX_LIMIT_GB, "流量上限").unwrap(), 0.0);
+        assert_eq!(sanitize_limit(2.0, MAX_LIMIT_GB, "流量上限").unwrap(), 2.0);
+    }
+
+    #[test]
+    fn auto_stop_ignores_non_finite_thresholds() {
+        assert!(decide_auto_stop(f64::NAN, f64::NAN, u64::MAX, f64::MAX).is_none());
+        assert!(decide_auto_stop(f64::INFINITY, 0.0, u64::MAX, 0.0).is_none());
+        // 正常阈值不受影响。
+        assert!(decide_auto_stop(1.0, 0.0, GIB as u64, 0.0).is_some());
+        assert!(decide_auto_stop(0.0, 1.0, 0, 60.0).is_some());
+    }
+
+    #[test]
+    fn jitter_is_bounded_and_worker_specific() {
+        assert_eq!(jitter_ms(7, 0), 0);
+        for seed in 0..8u64 {
+            assert!(jitter_ms(seed, 101) < 101);
+        }
+        let spread: std::collections::BTreeSet<u64> =
+            (0..32u64).map(|id| jitter_ms(id, 1000)).collect();
+        assert!(
+            spread.len() > 1,
+            "所有 worker 取到同一个抖动值 = 退避没有去同步"
+        );
+    }
+
+    #[test]
+    fn start_rejects_degenerate_payloads_before_spawning_anything() {
+        // 校验发生在 worker 派发之前，因此本测试不需要任何真实 IO。
+        let engine = Engine::spawn();
+        let base = StartRunRequest {
+            url: "https://example.test/file".to_owned(),
+            threads: 4,
+            rate_mib: 0.0,
+            limit_gb: 0.0,
+            limit_minutes: 0.0,
+            authorized: true,
+        };
+
+        let nan_rate = engine.start(StartRunRequest {
+            rate_mib: f64::NAN,
+            ..base.clone()
+        });
+        assert!(matches!(nan_rate, Err(CoreError::InvalidInput(_))));
+        assert!(!engine.is_running(), "被拒绝的请求不得进入运行态");
+
+        let nan_limit = engine.start(StartRunRequest {
+            limit_gb: f64::NAN,
+            ..base.clone()
+        });
+        assert!(matches!(nan_limit, Err(CoreError::InvalidInput(_))));
+        assert!(!engine.is_running());
+
+        // 回归点：极小速率是合法 JSON，旧实现会让 `Duration::from_secs_f64`
+        // 在 worker 里 panic（任务静默消失），这里必须能正常启动。
+        engine
+            .start(StartRunRequest {
+                rate_mib: 1e-300,
+                ..base
+            })
+            .expect("1e-300 MiB/s 是合法载荷");
+        assert!(engine.is_running());
+        assert_eq!(engine.snapshot(false).rate_mib, 1e-300);
+        engine.stop("单测收尾");
     }
 }

@@ -149,7 +149,7 @@ cargo run --locked --example headless_smoke -p loadloom-core
 在 CI、容器或无头服务器上做回归：
 
 ```bash
-cargo test --locked -p loadloom-core     # 18 个测试，无需图形环境
+cargo test --locked -p loadloom-core     # 无头核心全部测试，无需图形环境
 ```
 
 ---

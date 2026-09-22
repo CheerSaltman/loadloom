@@ -51,6 +51,30 @@ impl Metrics {
         }
     }
 
+    /// 在途请求 +1。
+    pub(crate) fn request_started(&self) {
+        let _ = self
+            .in_flight
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            });
+    }
+
+    /// 在途请求 -1，且**永不下溢**。
+    ///
+    /// 为什么不用裸 `fetch_sub`：`reset()` 与 worker 的收尾是并发的。
+    /// 「stop 之后立刻 start」时，上一轮某个请求的回包可能落在 `reset()`
+    /// 之后，于是这次 `fetch_sub` 会在已经归零的计数上再减一，把它变成
+    /// `u32::MAX` —— 界面上就是「在途 42 亿」。这里改用饱和减法：已经是 0
+    /// 就不再减，最坏情况只是少报一次，不会污染计数。
+    pub(crate) fn request_finished(&self) {
+        let _ = self
+            .in_flight
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_sub(1)
+            });
+    }
+
     /// 记录一次首包时延，并按 RFC3550 递推抖动。
     pub(crate) fn record_latency(&self, millis: f64) {
         self.latency_us
@@ -153,6 +177,22 @@ mod tests {
         assert!(metrics.last_error().is_empty());
         assert!(metrics.latency_ms().abs() < 1e-9);
         assert!(metrics.jitter_ms().abs() < 1e-9);
+    }
+
+    #[test]
+    fn in_flight_accounting_never_underflows() {
+        let metrics = Metrics::default();
+        // 归零状态下的迟到收尾：不得把计数减成 u32::MAX。
+        metrics.request_finished();
+        assert_eq!(metrics.in_flight.load(Ordering::Relaxed), 0);
+
+        metrics.request_started();
+        metrics.request_started();
+        metrics.request_finished();
+        assert_eq!(metrics.in_flight.load(Ordering::Relaxed), 1);
+        metrics.request_finished();
+        metrics.request_finished();
+        assert_eq!(metrics.in_flight.load(Ordering::Relaxed), 0);
     }
 
     #[test]

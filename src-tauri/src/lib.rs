@@ -60,10 +60,11 @@ fn stop_run(reason: Option<String>, state: State<'_, AppState>) {
     state.engine.stop(&reason);
 }
 
-/// 运行中动态调整并发 / 限速。
+/// 运行中动态调整并发 / 限速。非法载荷（`NaN`、越界值）返回强类型错误 ——
+/// 前端已经有统一的 `describeCoreError` 提示路径，这里不再静默丢弃。
 #[tauri::command]
-fn set_live_config(patch: LiveConfigPatch, state: State<'_, AppState>) {
-    state.engine.set_live(patch);
+fn set_live_config(patch: LiveConfigPatch, state: State<'_, AppState>) -> Result<(), CoreError> {
+    state.engine.set_live(patch)
 }
 
 /// 建立指标推流通道：后端主动推送，前端**不需要轮询**。

@@ -1,5 +1,10 @@
 name: CI
 
+# 最小权限：CI 只需要读仓库内容（checkout + 缓存）。显式声明可以避免仓库级
+# 默认权限被放大成写权限 —— 任何一次被注入的 workflow 改动都拿不到写能力。
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main, master]

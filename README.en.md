@@ -148,7 +148,7 @@ The example lives in `examples/`, compiled by `cargo test`.
 Regression testing in CI, containers or headless servers:
 
 ```bash
-cargo test --locked -p loadloom-core     # 18 tests, no graphical environment required
+cargo test --locked -p loadloom-core     # all core tests, no graphical environment required
 ```
 
 ---

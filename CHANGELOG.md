@@ -8,6 +8,72 @@
 - 待 `tauri-specta` 发布稳定版后，用生成的类型替换手写的 `src/bindings.ts`。
 - 将 `crates/loadloom-core/benches/throughput.rs` 升级为 criterion 基准，并接入历史基线对比。
 
+## [0.4.5] - 2026-09-22
+
+本版以**攻击者视角**重审了引擎的信任边界。前提很具体：`start_run` / `set_live_config`
+是 IPC Command，载荷可以来自任意前端代码或调试工具，因此里面每个数字都按
+**不可信输入**处理 —— 非法值明确拒绝，超范围值收敛后如实告知，绝不静默改写。
+
+### 安全修复
+
+- **畸形限速值让 worker 静默消失（高危）**：`rateMib: 1e-300` 是合法 JSON，`clamp`
+  之后仍是极小正值，令牌桶算出 `deficit / rate ≈ 6e298` 秒并交给
+  `Duration::from_secs_f64` —— 该函数在超出表示范围时直接 **panic**，worker 任务
+  被静默终止（release 为 `panic = "unwind"`，进程不崩，只是少了一条打流通道）。
+  现在等待时长统一由 `wait_from_seconds` 构造：非有限 / 非正数归零，超过 5 秒封顶，
+  且令牌债务下探不超过一个桶容量。
+- **「停止 → 立即开始」会留下未授权的多余 worker（高危）**：worker 的循环条件只看
+  `stop` 标志，而 `start()` 会把它清回 false —— 一个正在退避睡眠里的旧 worker 就此
+  「复活」，继续按上一轮的地址打流：实际并发超过用户授权值，流量也持续打向一个
+  已被叫停的目标。现在引入**运行代次**（`Control::run`），`start()` / `stop()`
+  各递增一次，旧代次的 worker 在下一次判定时立即退出。
+- **自动停止守卫可被静默关闭（中危）**：`limit_gb` 大到 `limit_gb * GIB` 溢出成
+  `inf` 时，`total_bytes as f64 >= inf` 永远为假 —— 用户以为设了安全上限，实际是
+  无上限流量。阈值现在在信任边界收敛到可达范围（1 PiB / 约 1 年），且被修改时
+  必定记一条 Warn 日志。
+- **`NaN` 会把限速与自动停止静默关掉（中危）**：`f64::clamp` 对 `NaN` 原样返回，
+  而 `NaN > 0.0` 为假，令牌桶于是把「限速」当成「不限速」；`NaN.max(0.0)` 返回 0，
+  在契约里正表示「关闭自动停止」。现在非有限值一律拒绝（`InvalidInput`）并广播原因。
+- **日志注入（CWE-117，中危）**：日志正文可能来自远端（`format!("请求失败：{error}")`），
+  其中的换行足以伪造出额外的日志行。现在所有正文在落盘 / 上屏的唯一边界上做输出
+  编码（换行、回车、制表符及控制字符转义），并截断到 2000 字符。
+- **HTTP 客户端构建失败会 fail-open（中危）**：`build_client` 结尾的
+  `Err(_) => reqwest::Client::new()` 会丢掉全部连接与读超时（任何一个不回包的源站
+  都能把 worker 永久挂死），而 `Client::new()` 自身在构建失败时还会 panic。现在退到
+  「只保留超时约束」的最小配置，并在第一次 `start()` 时把降级原因播报到日志流；连它也构造不出来时 `start()` 明确拒绝。
+
+### 修复
+
+- 失败退避由固定 400ms 改为**指数增长 + 按 worker 抖动**（400ms → 3.2s 封顶），
+  避免 32 个 worker 踩同一节拍重试形成惊群；退避切成 100ms 分片，`stop()` 不必等满
+  整个退避才生效。
+- 在途计数改为饱和加减：旧代次请求的迟到收尾不再可能把 `in_flight` 减成 `u32::MAX`。
+- `User-Agent` 的版本号取自包元数据（旧值恒为 `0.4`）。
+- `cache_busted_url` 兼容以 `?` / `&` 结尾的地址，不再产生 `?&_ll=` 这类空参数。
+
+### 重构
+
+- `rate.rs`：`Bucket::reserve` 成为纯计算，等待时长的构造与封顶收敛到唯一的
+  `wait_from_seconds`；`set_rate` 对任意 `f64` 都是全函数。
+- `engine.rs`：新增信任边界校验层（`sanitize_rate_mib` / `sanitize_limit` /
+  `Engine::checked`）；`set_live` 返回 `Result` 而非静默忽略非法载荷；HTTP 客户端
+  改为 `Option<Client>`，不可用时不静默裸奔。
+- `metrics.rs`：在途计数收敛为 `request_started` / `request_finished` 两个饱和操作。
+
+### 新增
+
+- 新增 `docs/threat-model.md`：资产、信任边界、攻击者可控输入与已接受的风险。
+- 新增 16 个测试（核心 26 → 42，桌面壳 7 → 9）：畸形速率不 panic 的回归、令牌债务
+  封顶、运行代次（含「已停止的一代不得继续产生流量」的端到端连接计数断言）、
+  自动停止上限可达性、非有限值拒绝、饱和在途计数、日志控制字符转义与截断。
+- CI 显式声明 `permissions: contents: read`（最小权限），与 `release.yml` 的
+  `contents: write` 形成对照。
+
+### 变更
+
+- `LiveConfigPatch` 的线格式不变；`set_live_config` 的失败路径改为返回强类型
+  `CoreError`，前端既有的 `describeCoreError` 提示路径可直接复用。
+
 ## [0.4.3] - 2026-09-22
 
 ### 修复
@@ -116,6 +182,7 @@
 - 历史遗留的 GUI 与本地服务依赖（egui / eframe / webbrowser / axum）。
 - 界面上的技术标签。
 
+[0.4.5]: https://github.com/CheerSaltman/loadloom/releases/tag/v0.4.5
 [0.4.3]: https://github.com/CheerSaltman/loadloom/releases/tag/v0.4.3
 [0.4.2]: https://github.com/CheerSaltman/loadloom/releases/tag/v0.4.2
 [0.4.1]: https://github.com/CheerSaltman/loadloom/releases/tag/v0.4.1

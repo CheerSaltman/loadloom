@@ -40,10 +40,10 @@ npm run typecheck                                                 # 前端类型
 
 | 套件 | 覆盖什么 |
 | --- | --- |
-| `loadloom-core` 单元测试（`engine` / `rate` / `metrics`） | 缓存破坏参数、自动停止、环形历史、成功率、令牌桶原子镜像与容量、错误分布排序与截断、RFC3550 抖动递推 |
+| `loadloom-core` 单元测试（`engine` / `rate` / `metrics`） | 信任边界校验（`NaN` 拒绝、速率与自动停止阈值收敛、上限可达性）、令牌桶原子镜像 / 容量 / 债务封顶 / 等待时长有界化、运行代次、退避抖动、饱和在途计数、缓存破坏参数、环形历史、成功率、错误分布排序与截断、RFC3550 抖动递推 |
 | `contract_wire` | 解析 `src/bindings.ts` 逐字段比对 serde 实产 JSON |
-| `headless_e2e` | 本地伪 origin 跑真实打流，含「裸线程无 Tokio 运行时」启动、并发启动只放行一个 |
-| `loadloom-desktop` 单元测试（`logging`） | UTC 时间戳与闰日换算、级别标签定宽、行格式、两代体积轮转、启动归档超限旧日志、坏句柄降级不 panic |
+| `headless_e2e` | 本地伪 origin 跑真实打流，含「裸线程无 Tokio 运行时」启动、并发启动只放行一个、**「已停止的一代不得继续产生流量」的连接计数断言** |
+| `loadloom-desktop` 单元测试（`logging`） | UTC 时间戳与闰日换算、级别标签定宽、行格式、控制字符转义与超长截断（CWE-117）、两代体积轮转、启动归档超限旧日志、坏句柄降级不 panic |
 
 `crates/loadloom-core/benches/throughput.rs` 是基准台，默认被 `#[ignore]` 门控，需要显式启用：
 
