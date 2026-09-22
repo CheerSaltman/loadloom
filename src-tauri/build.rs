@@ -13,8 +13,11 @@ fn main() {
         .filter(|id| !id.is_empty())
         .unwrap_or_else(|| "unknown".to_owned());
     println!("cargo:rustc-env=LOADLOOM_BUILD_ID={build_id}");
-    // HEAD 变了就重新注入，避免沿用上一次的构建号。
+    // 提交、切分支、打标签都要重新注入，避免沿用上一次的构建号。
+    // （HEAD 只存 ref 名，真正的提交哈希在 refs/ 下；两个都要看。）
     println!("cargo:rerun-if-changed=../.git/HEAD");
+    println!("cargo:rerun-if-changed=../.git/refs/heads");
+    println!("cargo:rerun-if-changed=../.git/refs/tags");
 
     tauri_build::build()
 }
