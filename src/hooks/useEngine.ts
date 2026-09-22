@@ -29,8 +29,6 @@ export interface EngineState {
   quit: () => Promise<void>;
 }
 
-const HANDLER_CAP = 400;
-
 /**
  * 引擎状态订阅 Hook。
  *
@@ -83,10 +81,7 @@ export function useEngine(): EngineState {
 
         unlisteners.push(
           await events.onLog((entry) => {
-            setLogs((previous) => {
-              const merged = [...previous, entry];
-              return merged.length > HANDLER_CAP ? merged.slice(merged.length - HANDLER_CAP) : merged;
-            });
+            setLogs((previous) => [...previous, entry]);
           }),
         );
         unlisteners.push(await events.onRunEvent((event) => setLastEvent(event)));

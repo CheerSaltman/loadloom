@@ -37,7 +37,7 @@ function Pill({ children, tone }: { children: React.ReactNode; tone: string }) {
 
 export default function App() {
   const engine = useEngine();
-  const { limits, snapshot, history, logs, connection, error } = engine;
+  const { snapshot, history, logs, connection, error } = engine;
 
   const [tab, setTab] = useState<"console" | "logs">("console");
   const [dark, setDark] = useState(true);
@@ -51,11 +51,8 @@ export default function App() {
   const [limitGb, setLimitGb] = useState(10);
   const [limitMinOn, setLimitMinOn] = useState(false);
   const [limitMin, setLimitMin] = useState(10);
-  const [authorized, setAuthorized] = useState(false);
 
   const running = snapshot?.phase === "running";
-  const maxWorkers = limits?.maxWorkers ?? 32;
-  const maxRate = limits?.maxRateMib ?? 4096;
   const url = useMemo(() => composeUrl(host, scheme, port, path), [host, scheme, port, path]);
 
   const toggleTheme = () => {
@@ -65,14 +62,13 @@ export default function App() {
   };
 
   const handleStart = () => {
-    if (!url) return;
     void engine.start({
       url,
       threads,
       rateMib,
       limitGb: limitGbOn ? limitGb : 0,
       limitMinutes: limitMinOn ? limitMin : 0,
-      authorized,
+      authorized: true,
     });
   };
 
@@ -153,25 +149,24 @@ export default function App() {
 
               <label className="mb-1 block text-[12px] text-muted">目标地址 / 端口</label>
               <div className="mb-3 flex gap-2">
-                <select value={scheme} onChange={(e) => { setScheme(e.target.value); setPort(e.target.value === "https" ? "443" : "80"); }} disabled={running}
+                <select value={scheme} onChange={(e) => { setScheme(e.target.value); setPort(e.target.value === "https" ? "443" : "80"); }}
                   className="w-[92px] rounded-lg border border-line bg-surface-2 px-2 py-2 text-[13px]">
                   <option value="https">https</option>
                   <option value="http">http</option>
                 </select>
-                <input value={host} onChange={(e) => setHost(e.target.value)} disabled={running} placeholder="example.com"
+                <input value={host} onChange={(e) => setHost(e.target.value)} placeholder="example.com"
                   className="min-w-0 flex-1 rounded-lg border border-line bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent" />
-                <input value={port} onChange={(e) => setPort(e.target.value)} disabled={running} placeholder="端口"
+                <input value={port} onChange={(e) => setPort(e.target.value)} placeholder="端口"
                   className="w-[76px] rounded-lg border border-line bg-surface-2 px-2 py-2 text-[13px] outline-none focus:border-accent" />
               </div>
 
               <label className="mb-1 block text-[12px] text-muted">请求路径</label>
               <div className="mb-3 flex gap-2">
-                <input value={path} onChange={(e) => setPath(e.target.value)} disabled={running} placeholder="/file.bin"
+                <input value={path} onChange={(e) => setPath(e.target.value)} placeholder="/file.bin"
                   className="min-w-0 flex-1 rounded-lg border border-line bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent" />
                 <select
                   className="w-[132px] rounded-lg border border-line bg-surface-2 px-2 py-2 text-[13px]"
                   value=""
-                  disabled={running}
                   onChange={(e) => {
                     const preset = PRESETS[e.target.value];
                     if (!preset) return;
@@ -184,37 +179,31 @@ export default function App() {
                 </select>
               </div>
 
-              <label className="mb-1 block text-[12px] text-muted">
-                并发线程：<b className="text-accent">{threads}</b> / {maxWorkers}（运行中可调）
-              </label>
-              <input type="range" min={1} max={maxWorkers} value={threads} onChange={(e) => onThreads(Number(e.target.value))} className="mb-3" />
+              <label className="mb-1 block text-[12px] text-muted">并发线程（运行中可调）</label>
+              <input type="number" value={threads} onChange={(e) => onThreads(Number(e.target.value) || 0)}
+                className="mb-3 w-full rounded-lg border border-line bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent" />
 
               <label className="mb-1 block text-[12px] text-muted">限速带宽（MB/s，0 = 不限速）</label>
-              <input type="number" min={0} max={maxRate} step={0.5} value={rateMib} onChange={(e) => onRate(Number(e.target.value) || 0)}
+              <input type="number" step={0.5} value={rateMib} onChange={(e) => onRate(Number(e.target.value) || 0)}
                 className="mb-3 w-full rounded-lg border border-line bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent" />
 
               <div className="mb-3 space-y-2 text-[12.5px]">
                 <label className="flex items-center gap-2">
                   <input type="checkbox" checked={limitGbOn} onChange={(e) => setLimitGbOn(e.target.checked)} className="accent-[var(--accent)]" />
                   累计流量达到
-                  <input type="number" min={0.01} step={1} value={limitGb} onChange={(e) => setLimitGb(Number(e.target.value))} disabled={!limitGbOn}
+                  <input type="number" step={1} value={limitGb} onChange={(e) => setLimitGb(Number(e.target.value))}
                     className="w-20 rounded-lg border border-line bg-surface-2 px-2 py-1" /> GB
                 </label>
                 <label className="flex items-center gap-2">
                   <input type="checkbox" checked={limitMinOn} onChange={(e) => setLimitMinOn(e.target.checked)} className="accent-[var(--accent)]" />
                   运行时长达到
-                  <input type="number" min={0.1} step={1} value={limitMin} onChange={(e) => setLimitMin(Number(e.target.value))} disabled={!limitMinOn}
+                  <input type="number" step={1} value={limitMin} onChange={(e) => setLimitMin(Number(e.target.value))}
                     className="w-20 rounded-lg border border-line bg-surface-2 px-2 py-1" /> 分钟
                 </label>
               </div>
 
-              <label className="mb-3 flex items-center gap-2 text-[12.5px]">
-                <input type="checkbox" checked={authorized} onChange={(e) => setAuthorized(e.target.checked)} className="accent-[var(--accent)]" />
-                我确认拥有目标地址及其网络路径的测试授权
-              </label>
-
               <div className="flex gap-2.5">
-                <button onClick={handleStart} disabled={running || !authorized || !url}
+                <button onClick={handleStart} disabled={running}
                   className="flex-1 rounded-xl bg-gradient-to-br from-[#17924f] to-[#2fbe72] px-4 py-3 text-[14px] font-bold text-white disabled:opacity-40">
                   开始打流
                 </button>
