@@ -483,6 +483,19 @@ pub(crate) fn init(app: AppHandle, engine: &Arc<Engine>) {
             header = env_header()
         ),
     );
+    // 引擎在 `Engine::spawn()` 里也写了一条就绪日志，但那一刻还没有任何订阅者，
+    // broadcast 会直接把它丢掉（见 `Engine::client_note` 的注释）。上限属于
+    // 「复现一次运行所需的环境信息」，必须真的落盘，因此在壳层再写一条。
+    let limits = Engine::limits();
+    write_full(
+        LogLevel::Info,
+        codes::sys::ENGINE_READY,
+        "shell:logging.rs",
+        &format!(
+            "打流引擎已就绪 · 并发上限 {} · 限速上限 {:.0} MiB/s · 采样周期 {} ms",
+            limits.max_workers, limits.max_rate_mib, limits.tick_ms
+        ),
+    );
     install_panic_hook(app, Arc::clone(engine));
 }
 

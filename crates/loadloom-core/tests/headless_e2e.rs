@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 
-use loadloom_core::{CoreError, Engine, LiveConfigPatch, RunPhase, StartRunRequest};
+use loadloom_core::{codes, CoreError, Engine, LiveConfigPatch, RunPhase, StartRunRequest};
 
 /// 一个极简的本地 HTTP 服务：对每个连接回一个固定大小的响应体。
 /// 用来在完全离线、无界面的条件下驱动真实打流链路。
@@ -426,4 +426,93 @@ fn starts_from_a_thread_with_no_tokio_runtime() {
 
     engine.stop("闪退回归测试结束");
     assert_eq!(engine.snapshot(false).phase, RunPhase::Idle);
+}
+
+/// 失败日志必须「可定位」且不刷屏。
+///
+/// 场景：目标端口无人监听（连接被立即拒绝）—— 这是「打流一直没数据」最常见的原因。
+/// 旧日志在这里只有聚合计数，用户报告「一直失败」时无法回答三个关键问题：哪一类
+/// 错误、发生在哪个 worker、引擎有没有在退避重试。本测试把这三件事全部钉住，
+/// 同时验证节流：失败日志的数量必须远小于失败次数，不能把 4 MiB 主日志刷爆。
+#[test]
+fn worker_failures_are_logged_with_codes_context_and_throttling() {
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    runtime.block_on(async {
+        // 先占一个端口再释放：之后的连接会被立即拒绝，且不依赖外网。
+        let port = {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("占位端口");
+            listener.local_addr().expect("读取端口").port()
+        };
+
+        let engine = Engine::spawn();
+        let mut logs = engine.subscribe_logs();
+        engine
+            .start(StartRunRequest {
+                url: format!("http://127.0.0.1:{port}/payload"),
+                threads: 2,
+                rate_mib: 0.0,
+                limit_gb: 0.0,
+                limit_minutes: 0.0,
+                authorized: true,
+            })
+            .expect("启动应成功（失败发生在请求阶段）");
+
+        // 「连接被拒绝」的返回时间依赖本机 TCP 行为（Windows 实测接近 2 秒），
+        // 因此用轮询 + 截止时间，而不是把测试绑死在某个固定睡眠上；等不到才是失败。
+        let mut entries = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            while let Ok(entry) = logs.try_recv() {
+                entries.push(entry);
+            }
+            let has_failure = entries
+                .iter()
+                .any(|entry| entry.code == codes::net::REQUEST_FAILED);
+            let has_backoff = entries
+                .iter()
+                .any(|entry| entry.code == codes::net::BACKOFF);
+            if (has_failure && has_backoff) || Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        engine.stop("失败日志测试结束");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        while let Ok(entry) = logs.try_recv() {
+            entries.push(entry);
+        }
+
+        let failures: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.code == codes::net::REQUEST_FAILED)
+            .collect();
+        assert!(
+            !failures.is_empty(),
+            "连接被拒绝必须留下 {}，实际拿到 {:?}",
+            codes::net::REQUEST_FAILED,
+            entries.iter().map(|entry| &entry.code).collect::<Vec<_>>()
+        );
+        assert!(
+            failures.len() <= 8,
+            "1.5 秒内的失败日志必须被节流，实际 {} 条",
+            failures.len()
+        );
+        assert!(
+            failures
+                .iter()
+                .all(|entry| entry.message.contains("run=") && entry.message.contains("worker#")),
+            "失败日志必须带 run 号与 worker 号：{:?}",
+            failures.first().map(|entry| &entry.message)
+        );
+        assert!(
+            failures.iter().all(|entry| !entry.source.is_empty()),
+            "每条失败日志都必须带来源位置"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.code == codes::net::BACKOFF),
+            "退避重试必须留痕，否则无法区分「快速重试」与「指数退避中」"
+        );
+    });
 }
