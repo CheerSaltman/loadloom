@@ -39,6 +39,11 @@ fn main() {
             rate_mib: 0.0, // 0 = 不限速
             limit_gb: 0.0, // 0 = 不按流量停止
             limit_minutes: 0.0,
+            ramp_up_secs: 0.0,
+            profile: Default::default(),
+            peer_urls: Vec::new(),
+            failure_stop_percent: 0.0,
+            latency_stop_ms: 0.0,
             authorized: true,
         })
         .expect("启动打流不应失败（URL 合法且已声明授权）");

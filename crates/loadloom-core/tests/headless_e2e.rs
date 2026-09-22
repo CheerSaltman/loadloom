@@ -49,6 +49,11 @@ fn request(url: String, authorized: bool) -> StartRunRequest {
         rate_mib: 0.0,
         limit_gb: 0.0,
         limit_minutes: 0.0,
+        ramp_up_secs: 0.0,
+        profile: Default::default(),
+        peer_urls: Vec::new(),
+        failure_stop_percent: 0.0,
+        latency_stop_ms: 0.0,
         authorized,
     }
 }
@@ -383,6 +388,11 @@ fn starts_from_a_thread_with_no_tokio_runtime() {
             rate_mib: 0.0,
             limit_gb: 0.0,
             limit_minutes: 0.0,
+            ramp_up_secs: 0.0,
+            profile: Default::default(),
+            peer_urls: Vec::new(),
+            failure_stop_percent: 0.0,
+            latency_stop_ms: 0.0,
             authorized: true,
         })
         .expect("无运行时线程上启动打流不应失败");
@@ -453,6 +463,11 @@ fn worker_failures_are_logged_with_codes_context_and_throttling() {
                 rate_mib: 0.0,
                 limit_gb: 0.0,
                 limit_minutes: 0.0,
+                ramp_up_secs: 0.0,
+                profile: Default::default(),
+                peer_urls: Vec::new(),
+                failure_stop_percent: 0.0,
+                latency_stop_ms: 0.0,
                 authorized: true,
             })
             .expect("启动应成功（失败发生在请求阶段）");

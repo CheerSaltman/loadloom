@@ -62,6 +62,19 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
 
+  pt-sidecar:
+    name: PT sidecar (Go)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.8"
+          cache-dependency-path: sidecars/loadloom-pt/go.sum
+      - run: npm run pt:test
+      - run: npm run pt:vet
+      - run: npm run pt:build
+
   # 桌面壳：必须在 Windows 上编译（WebView2 / NSIS 工具链）。
   desktop:
     name: desktop (windows)
@@ -76,7 +89,12 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.8"
+          cache-dependency-path: sidecars/loadloom-pt/go.sum
       - run: npm ci
+      - run: npm run pt:build
       - name: 前端产物（tauri 编译期需要 dist/ 存在）
         run: npm run build
       - name: 编译桌面壳

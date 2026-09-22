@@ -1,7 +1,7 @@
 {
   "name": "loadloom",
   "private": true,
-  "version": "0.4.6",
+  "version": "0.4.7",
   "type": "module",
   "description": "LoadLoom — 原生桌面打流控制台（Tauri v2 + React + Tailwind）",
   "engines": {
@@ -11,9 +11,12 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
+    "pt:test": "cd sidecars/loadloom-pt && go test ./...",
+    "pt:vet": "cd sidecars/loadloom-pt && go vet ./...",
+    "pt:build": "go build -C sidecars/loadloom-pt -trimpath -ldflags=\"-s -w\" -o ../../src-tauri/binaries/loadloom-pt-x86_64-pc-windows-msvc.exe .",
     "tauri": "tauri",
-    "desktop:dev": "tauri dev",
-    "desktop:build": "tauri build"
+    "desktop:dev": "npm run pt:build && tauri dev",
+    "desktop:build": "npm run pt:build && tauri build"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

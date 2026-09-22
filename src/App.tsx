@@ -3,6 +3,7 @@ import { LineChart } from "@/components/LineChart";
 import { NicPanel } from "@/components/NicPanel";
 import { useNic } from "@/hooks/useNic";
 import { useEngine } from "@/hooks/useEngine";
+import { usePt } from "@/hooks/usePt";
 import { commands, type LogLevel } from "@/bindings";
 import {
   cn,
@@ -64,6 +65,7 @@ function shouldReportError(key: string): boolean {
 
 export default function App() {
   const engine = useEngine();
+  const pt = usePt();
   // 网卡监测与打流各自独立推流：曲线与事件按 500ms 一帧进入同一个界面，
   // 但互不阻塞 —— 打流停止后链路监测仍在继续。
   const nic = useNic();
@@ -77,6 +79,17 @@ export default function App() {
   const [path, setPath] = useState("/");
   const [threads, setThreads] = useState(8);
   const [rateMib, setRateMib] = useState(0);
+  const [rampUpSecs, setRampUpSecs] = useState(0);
+  const [profile, setProfile] = useState<"httpDownload" | "localPt" | "torrentSwarm">("httpDownload");
+  const [peerUrls, setPeerUrls] = useState("");
+  const [torrentSource, setTorrentSource] = useState("");
+  const [ptConnections, setPtConnections] = useState(180);
+  const [ptRamMib, setPtRamMib] = useState(512);
+  const [ptDurationSecs, setPtDurationSecs] = useState(600);
+  const [ptMaxDownloadGib, setPtMaxDownloadGib] = useState(0);
+  const [ptStalledSecs, setPtStalledSecs] = useState(15);
+  const [failureStopPercent, setFailureStopPercent] = useState(20);
+  const [latencyStopMs, setLatencyStopMs] = useState(3000);
   const [limitGbOn, setLimitGbOn] = useState(false);
   const [limitGb, setLimitGb] = useState(10);
   const [limitMinOn, setLimitMinOn] = useState(false);
@@ -87,10 +100,32 @@ export default function App() {
   const [autoScroll, setAutoScroll] = useState(true);
   const logPaneRef = useRef<HTMLDivElement | null>(null);
 
-  const running = snapshot?.phase === "running";
+  const ptRunning = pt.snapshot?.phase === "starting" || pt.snapshot?.phase === "metadata" || pt.snapshot?.phase === "downloading";
+  const httpRunning = snapshot?.phase === "running";
+  const running = httpRunning || ptRunning;
+  const torrentMode = profile === "torrentSwarm";
   const limitGbValid = Number.isFinite(limitGb) && limitGb > 0;
   const limitMinValid = Number.isFinite(limitMin) && limitMin > 0;
   const url = useMemo(() => composeUrl(host, scheme, port, path), [host, scheme, port, path]);
+  const ptBottleneckHint = useMemo(() => {
+    const adapter = [...(nic.snapshot?.adapters ?? [])]
+      .filter((item) => item.monitored && item.class === "physical")
+      .sort((left, right) => right.rxBps - left.rxBps)[0];
+    if (!adapter) return "没有可用的物理网卡采样，暂时无法定位瓶颈。";
+    if (adapter.rxErrorsPerSec > 0 || adapter.rxDiscardsPerSec > 0) {
+      return `${adapter.name} 正在出现接收错误或丢弃，优先排查 Wi-Fi 信号、驱动和信道拥塞。`;
+    }
+    if (adapter.rxUtilization >= 85) {
+      return `${adapter.name} RX 利用率 ${adapter.rxUtilization.toFixed(1)}%，无线链路已接近协商速率上限。`;
+    }
+    if ((pt.snapshot?.deadPeerPercent ?? 0) >= 60 || (pt.snapshot?.stalledPeers ?? 0) * 2 >= (pt.snapshot?.activePeers ?? 1)) {
+      return `网卡 RX 利用率仅 ${adapter.rxUtilization.toFixed(1)}%，同时 Peer 死链/卡死比例偏高，公网 swarm 更可能先成为瓶颈。`;
+    }
+    if ((pt.snapshot?.halfOpenPeers ?? 0) >= 20 && (pt.snapshot?.activePeers ?? 0) < 8) {
+      return `存在 ${pt.snapshot?.halfOpenPeers ?? 0} 个半开连接但已建立连接较少，路由器 NAT、运营商或公网握手路径可能受限。`;
+    }
+    return `${adapter.name} RX 利用率 ${adapter.rxUtilization.toFixed(1)}%；当前证据不足以把瓶颈唯一归因于网卡或路由器。`;
+  }, [nic.snapshot, pt.snapshot]);
 
   // 并发与限速的权威在后端：请求 64 线程会被收敛到 MAX_WORKERS。这里把快照里的
   // **实际生效值**回填给输入框，显示值不再与引擎真实状态背离。
@@ -258,15 +293,41 @@ export default function App() {
   };
 
   const handleStart = () => {
+    if (torrentMode) {
+      void pt.start({
+        source: torrentSource.trim(),
+        maxConnections: ptConnections,
+        ramMib: ptRamMib,
+        durationSecs: ptDurationSecs,
+        maxDownloadGib: ptMaxDownloadGib,
+        rateMib,
+        stalledPeerSecs: ptStalledSecs,
+        authorized: true,
+      });
+      return;
+    }
     void engine.start({
       url,
       threads,
       rateMib,
+      rampUpSecs,
+      profile: profile === "localPt" ? "localPt" : "httpDownload",
+      peerUrls: peerUrls.split(/\r?\n/).map((value) => value.trim()).filter(Boolean),
+      failureStopPercent,
+      latencyStopMs,
       // 上限只在「已勾选 + 有限正数」时发送：0 在引擎里等于关闭自动停止。
       limitGb: limitGbOn && limitGbValid ? limitGb : 0,
       limitMinutes: limitMinOn && limitMinValid ? limitMin : 0,
       authorized: true,
     });
+  };
+
+  const handleStop = () => {
+    if (ptRunning) {
+      void pt.stop();
+    } else {
+      void engine.stop("已由用户手动停止");
+    }
   };
 
   // 只接受有限数：`Number("") || 0` 会把「清空输入框」折算成 0（静默关掉
@@ -284,13 +345,31 @@ export default function App() {
     // 范围收敛仍归后端（1..=MAX_WORKERS），显示值随后由快照回填。
     const next = Math.trunc(value);
     setThreads(next);
-    if (running) void engine.patchLive({ threads: next, rateMib: null });
+    if (httpRunning) void engine.patchLive({ threads: next, rateMib: null });
   };
   const onRate = (raw: string) => {
     const value = parseFinite(raw);
     if (value === null) return;
     setRateMib(value);
-    if (running) void engine.patchLive({ threads: null, rateMib: value });
+    if (httpRunning) void engine.patchLive({ threads: null, rateMib: value });
+  };
+
+  const onRampUp = (raw: string) => {
+    const value = parseFinite(raw);
+    if (value === null) return;
+    setRampUpSecs(Math.max(0, value));
+  };
+
+  const onFailureStopPercent = (raw: string) => {
+    const value = parseFinite(raw);
+    if (value === null) return;
+    setFailureStopPercent(Math.max(0, Math.min(100, value)));
+  };
+
+  const onLatencyStopMs = (raw: string) => {
+    const value = parseFinite(raw);
+    if (value === null) return;
+    setLatencyStopMs(Math.max(0, value));
   };
 
   // 上限为 0 / 非有限值 = 引擎侧「没有上限」。绝不能让它带着勾选状态静默送出，
@@ -344,9 +423,10 @@ export default function App() {
     setLimitMinOn(checked);
   };
 
-  const speedSeries = history.map((point) => point.speedBps);
-  const latencySeries = history.map((point) => point.latencyMs);
-  const jitterSeries = history.map((point) => point.jitterMs);
+  const activeHistory = torrentMode ? pt.history : history;
+  const speedSeries = activeHistory.map((point) => point.speedBps);
+  const latencySeries = activeHistory.map((point) => point.latencyMs);
+  const jitterSeries = activeHistory.map((point) => point.jitterMs);
 
   return (
     <div className="flex h-screen w-screen">
@@ -401,7 +481,7 @@ export default function App() {
             <Pill tone={running ? "border-good/40 bg-good/10 text-good" : "border-line bg-surface text-muted"}>
               {running ? "打流中" : "待机"}
             </Pill>
-            <Pill tone="border-line bg-surface text-muted">运行时长 {formatDuration(snapshot?.elapsedSecs ?? 0)}</Pill>
+            <Pill tone="border-line bg-surface text-muted">运行时长 {formatDuration(torrentMode ? (pt.snapshot?.elapsedSecs ?? 0) : (snapshot?.elapsedSecs ?? 0))}</Pill>
           </div>
         </header>
 
@@ -411,6 +491,58 @@ export default function App() {
             <section className="rounded-2xl border border-line bg-surface p-4">
               <h2 className="mb-3 text-[14px] font-bold">打流参数</h2>
 
+              <label className="mb-1 block text-[12px] text-muted">流量模型</label>
+              <select value={profile} onChange={(e) => setProfile(e.target.value as "httpDownload" | "localPt" | "torrentSwarm")}
+                className="mb-3 w-full rounded-lg border border-line bg-surface-2 px-3 py-2 text-[13px]">
+                <option value="httpDownload">HTTP 持续下载</option>
+                <option value="localPt">局域网 HTTP 分片仿真</option>
+                <option value="torrentSwarm">真实公网 PT Swarm（RAM 丢弃）</option>
+              </select>
+
+              {torrentMode ? (
+                <>
+                  <label className="mb-1 block text-[12px] text-muted">Magnet 或公开 .torrent URL</label>
+                  <textarea value={torrentSource} onChange={(e) => setTorrentSource(e.target.value)} rows={5}
+                    placeholder="magnet:?xt=urn:btih:…（建议使用 Ubuntu / Debian 等合法公开发行版）"
+                    className="mb-2 w-full resize-y rounded-lg border border-line bg-surface-2 px-3 py-2 font-mono text-[11px] outline-none focus:border-accent" />
+                  <div className="mb-3 grid grid-cols-2 gap-2">
+                    <label className="text-[12px] text-muted">最大 Peer 连接
+                      <input type="number" min={8} max={500} step={1} value={ptConnections}
+                        onChange={(e) => setPtConnections(Math.trunc(Number(e.target.value)))}
+                        className="mt-1 w-full rounded-lg border border-line bg-surface-2 px-2 py-2 text-[13px]" />
+                    </label>
+                    <label className="text-[12px] text-muted">RAM 上限（MiB）
+                      <input type="number" min={64} max={4096} step={64} value={ptRamMib}
+                        onChange={(e) => setPtRamMib(Math.trunc(Number(e.target.value)))}
+                        className="mt-1 w-full rounded-lg border border-line bg-surface-2 px-2 py-2 text-[13px]" />
+                    </label>
+                    <label className="text-[12px] text-muted">运行时长（秒）
+                      <input type="number" min={0} max={86400} step={60} value={ptDurationSecs}
+                        onChange={(e) => setPtDurationSecs(Math.trunc(Number(e.target.value)))}
+                        className="mt-1 w-full rounded-lg border border-line bg-surface-2 px-2 py-2 text-[13px]" />
+                    </label>
+                    <label className="text-[12px] text-muted">下载上限（GiB，0=整包）
+                      <input type="number" min={0} max={1024} step={1} value={ptMaxDownloadGib}
+                        onChange={(e) => setPtMaxDownloadGib(Number(e.target.value))}
+                        className="mt-1 w-full rounded-lg border border-line bg-surface-2 px-2 py-2 text-[13px]" />
+                    </label>
+                    <label className="text-[12px] text-muted">死链窗口（秒）
+                      <input type="number" min={5} max={120} step={5} value={ptStalledSecs}
+                        onChange={(e) => setPtStalledSecs(Math.trunc(Number(e.target.value)))}
+                        className="mt-1 w-full rounded-lg border border-line bg-surface-2 px-2 py-2 text-[13px]" />
+                    </label>
+                    <label className="text-[12px] text-muted">限速（MiB/s，0=不限）
+                      <input type="number" min={0} max={4096} step={1} value={rateMib}
+                        onChange={(e) => onRate(e.target.value)}
+                        className="mt-1 w-full rounded-lg border border-line bg-surface-2 px-2 py-2 text-[13px]" />
+                    </label>
+                  </div>
+                  <p className="mb-3 rounded-lg border border-accent/25 bg-accent/5 px-3 py-2 text-[11px] leading-relaxed text-muted">
+                    DHT、PEX、uTP 与 TCP 全部启用；不上传、不创建下载文件。每个 piece 只在 RAM 中保留到哈希校验，随后立即释放。结果是公网端到端上限，需结合网卡页判断瓶颈。
+                  </p>
+                </>
+              ) : (
+                <>
               <label className="mb-1 block text-[12px] text-muted">目标地址 / 端口</label>
               <div className="mb-3 flex gap-2">
                 <select value={scheme} onChange={(e) => { setScheme(e.target.value); setPort(e.target.value === "https" ? "443" : "80"); }}
@@ -423,6 +555,16 @@ export default function App() {
                 <input value={port} onChange={(e) => setPort(e.target.value)} placeholder="端口"
                   className="w-[76px] rounded-lg border border-line bg-surface-2 px-2 py-2 text-[13px] outline-none focus:border-accent" />
               </div>
+
+              {profile === "localPt" ? (
+                <>
+                  <label className="mb-1 block text-[12px] text-muted">额外 Peer URL（每行一个）</label>
+                  <textarea value={peerUrls} onChange={(e) => setPeerUrls(e.target.value)} rows={3}
+                    placeholder={"http://192.168.1.20:8080/file.bin\nhttp://192.168.1.21:8080/file.bin"}
+                    className="mb-1 w-full resize-y rounded-lg border border-line bg-surface-2 px-3 py-2 text-[12px] outline-none focus:border-accent" />
+                  <p className="mb-3 text-[11px] text-muted">仅接受 localhost、回环或私有 IP；请求会轮转 Peer 并模拟 256 KiB–2 MiB 分片。</p>
+                </>
+              ) : null}
 
               <label className="mb-1 block text-[12px] text-muted">请求路径</label>
               <div className="mb-3 flex gap-2">
@@ -451,6 +593,23 @@ export default function App() {
               <input type="number" step={0.5} value={rateMib} onChange={(e) => onRate(e.target.value)}
                 className="mb-3 w-full rounded-lg border border-line bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent" />
 
+              <label className="mb-1 block text-[12px] text-muted">渐进升压（秒，0 = 立即达到并发）</label>
+              <input type="number" min={0} step={1} value={rampUpSecs} onChange={(e) => onRampUp(e.target.value)}
+                className="mb-3 w-full rounded-lg border border-line bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent" />
+
+              <div className="mb-3 grid grid-cols-2 gap-2">
+                <label className="text-[12px] text-muted">
+                  失败率熔断（%）
+                  <input type="number" min={0} max={100} step={1} value={failureStopPercent} onChange={(e) => onFailureStopPercent(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-line bg-surface-2 px-2 py-2 text-[13px] outline-none focus:border-accent" />
+                </label>
+                <label className="text-[12px] text-muted">
+                  时延熔断（ms）
+                  <input type="number" min={0} step={100} value={latencyStopMs} onChange={(e) => onLatencyStopMs(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-line bg-surface-2 px-2 py-2 text-[13px] outline-none focus:border-accent" />
+                </label>
+              </div>
+
               <div className="mb-3 space-y-2 text-[12.5px]">
                 <label className="flex items-center gap-2">
                   <input type="checkbox" checked={limitGbOn} onChange={(e) => onToggleLimitGb(e.target.checked)} className="accent-[var(--accent)]" />
@@ -465,40 +624,91 @@ export default function App() {
                     className="w-20 rounded-lg border border-line bg-surface-2 px-2 py-1" /> 分钟
                 </label>
               </div>
+                </>
+              )}
 
               <div className="flex gap-2.5">
                 <button onClick={handleStart} disabled={running}
                   className="flex-1 rounded-xl bg-gradient-to-br from-[#17924f] to-[#2fbe72] px-4 py-3 text-[14px] font-bold text-white disabled:opacity-40">
                   开始打流
                 </button>
-                <button onClick={() => void engine.stop("已由用户手动停止")} disabled={!running}
+                <button onClick={handleStop} disabled={!running}
                   className="flex-1 rounded-xl bg-gradient-to-br from-[#a4323f] to-[#d45563] px-4 py-3 text-[14px] font-bold text-white disabled:opacity-40">
                   停止
                 </button>
               </div>
 
-              <div className={cn("mt-3 min-h-[18px] text-[12.5px]", error ? "text-bad" : notice ? "text-warn" : running ? "text-good" : "text-muted")}>
-                {error ?? notice ?? snapshot?.status ?? "准备就绪 · 等待开始"}
+              <div className={cn("mt-3 min-h-[18px] text-[12.5px]", (error || pt.error) ? "text-bad" : notice ? "text-warn" : running ? "text-good" : "text-muted")}>
+                {pt.error ?? error ?? notice ?? (torrentMode ? pt.snapshot?.status : snapshot?.status) ?? "准备就绪 · 等待开始"}
               </div>
             </section>
 
             {/* 数据区 */}
             <section className="flex min-w-0 flex-col gap-4">
               <div className="grid grid-cols-[repeat(auto-fit,minmax(186px,1fr))] gap-3">
+                {torrentMode ? (
+                  <>
+                    <Card label="有效 PT 流量" value={formatBytes(pt.snapshot?.totalBytes ?? 0)} sub={`线速字节 ${formatBytes(pt.snapshot?.wireBytes ?? 0)}`} tone="bg-accent" />
+                    <Card label="实时速率" value={formatRate(pt.snapshot?.speedBps ?? 0)} sub={formatGbps(pt.snapshot?.speedBps ?? 0)} tone="bg-good" />
+                    <Card label="Peer 连接" value={String(pt.snapshot?.activePeers ?? 0)} sub={`有效 ${pt.snapshot?.usefulPeers ?? 0} · 半开 ${pt.snapshot?.halfOpenPeers ?? 0}`} tone="bg-indigo" />
+                    <Card label="死链分析" value={`${(pt.snapshot?.deadPeerPercent ?? 0).toFixed(1)}%`} sub={`死链 ${pt.snapshot?.deadPeers ?? 0} · 卡死 ${pt.snapshot?.stalledPeers ?? 0}`} tone="bg-bad" />
+                    <Card label="RAM Piece 缓冲" value={formatBytes(pt.snapshot?.ramUsedBytes ?? 0)} sub={`峰值 ${formatBytes(pt.snapshot?.ramPeakBytes ?? 0)} / 上限 ${formatBytes(pt.snapshot?.ramLimitBytes ?? 0)}`} tone="bg-warn" />
+                    <Card label="Piece 校验" value={String(pt.snapshot?.goodPieces ?? 0)} sub={`失败 ${pt.snapshot?.badPieces ?? 0} · 进度 ${(pt.snapshot?.progressPercent ?? 0).toFixed(1)}%`} tone="bg-good" />
+                    <Card label="压力分析" value={pt.snapshot?.pressureLevel === "critical" ? "严重" : pt.snapshot?.pressureLevel === "warning" ? "预警" : "正常"}
+                      sub={pt.snapshot?.pressureReason ?? "等待采样"} tone={pt.snapshot?.pressureLevel === "critical" ? "bg-bad" : pt.snapshot?.pressureLevel === "warning" ? "bg-warn" : "bg-good"} />
+                  </>
+                ) : (
+                  <>
                 <Card label="累计流量" value={formatBytes(snapshot?.totalBytes ?? 0)} sub={limitGbOn || limitMinOn ? "已设置自动停止" : "未设置自动停止"} tone="bg-accent" />
                 <Card label="实时速率" value={formatRate(snapshot?.speedBps ?? 0)} sub={formatGbps(snapshot?.speedBps ?? 0)} tone="bg-good" />
                 <Card label="首包时延 TTFB" value={snapshot?.latencyMs ? `${snapshot.latencyMs.toFixed(1)} ms` : "--"} sub="毫秒 · 最近一次" tone="bg-warn" />
                 <Card label="网络抖动 Jitter" value={snapshot?.jitterMs ? `${snapshot.jitterMs.toFixed(2)} ms` : "--"} sub="RFC3550 递推" tone="bg-indigo" />
                 <Card label="请求成功率" value={snapshot && snapshot.completed + snapshot.failures > 0 ? `${snapshot.successRate.toFixed(2)}%` : "--"} sub={`成功 ${snapshot?.completed ?? 0} / 失败 ${snapshot?.failures ?? 0}`} tone="bg-good" />
                 <Card label="失败请求数" value={String(snapshot?.failures ?? 0)} sub={`在途连接 ${snapshot?.inFlight ?? 0}`} tone="bg-bad" />
+                <Card label="压力保护" value={snapshot?.pressureLevel === "critical" ? "已熔断" : snapshot?.pressureLevel === "warning" ? "预警" : "正常"}
+                  sub={snapshot?.pressureReason ?? "等待采样"} tone={snapshot?.pressureLevel === "critical" ? "bg-bad" : snapshot?.pressureLevel === "warning" ? "bg-warn" : "bg-good"} />
+                  </>
+                )}
               </div>
 
+              {torrentMode ? (
+                <>
+                <div className="rounded-2xl border border-line bg-surface p-4">
+                  <div className="mb-3 flex flex-wrap items-center gap-4 text-[12px] text-muted">
+                    <h2 className="text-[14px] font-bold text-ink">实时 PT 速度曲线</h2>
+                    <span>峰值 <b className="text-ink">{formatRate(Math.max(0, ...speedSeries))}</b></span>
+                    <span>均值 <b className="text-ink">{formatRate(pt.snapshot?.averageBps ?? 0)}</b></span>
+                    <span>限速 <b className="text-ink">{rateMib > 0 ? `${rateMib.toFixed(1)} MiB/s` : "不限"}</b></span>
+                  </div>
+                  <LineChart series={[{ label: "速率", color: "var(--accent)", values: speedSeries }]} height={190} />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="rounded-2xl border border-line bg-surface p-4 text-[12.5px]">
+                    <h2 className="mb-3 text-[14px] font-bold">Peer / Tracker 诊断</h2>
+                    <div className="grid grid-cols-2 gap-y-2 text-muted">
+                      <span>握手成功</span><b className="text-right text-ink">{pt.snapshot?.peerHandshakes ?? 0}</b>
+                      <span>连接关闭</span><b className="text-right text-ink">{pt.snapshot?.closedPeers ?? 0}</b>
+                      <span>Tracker 成功 / 错误</span><b className="text-right text-ink">{pt.snapshot?.trackerSuccesses ?? 0} / {pt.snapshot?.trackerErrors ?? 0}</b>
+                      <span>无效/浪费流量</span><b className="text-right text-ink">{formatBytes(pt.snapshot?.wastedBytes ?? 0)}</b>
+                      <span>存储错误</span><b className="text-right text-ink">{pt.snapshot?.storageErrors ?? 0}</b>
+                    </div>
+                  </div>
+                  <div className="rounded-2xl border border-line bg-surface p-4 text-[12.5px]">
+                    <h2 className="mb-3 text-[14px] font-bold">瓶颈判读</h2>
+                    <p className="leading-relaxed text-ink">{ptBottleneckHint}</p>
+                    <p className="mt-2 leading-relaxed text-muted">公网测试始终是无线网卡、路由器、宽带和 swarm 的共同上限；单端无法绝对排除路由器。</p>
+                    {pt.snapshot?.lastError ? <p className="mt-2 break-all text-bad">{pt.snapshot.lastError}</p> : null}
+                  </div>
+                </div>
+                </>
+              ) : (
+                <>
               <div className="rounded-2xl border border-line bg-surface p-4">
                 <div className="mb-3 flex flex-wrap items-center gap-4 text-[12px] text-muted">
                   <h2 className="text-[14px] font-bold text-ink">实时速度曲线</h2>
-                  <span>峰值 <b className="text-ink">{formatRate(snapshot?.peakBps ?? 0)}</b></span>
-                  <span>均值 <b className="text-ink">{formatRate(snapshot?.avgBps ?? 0)}</b></span>
-                  <span>限速 <b className="text-ink">{snapshot?.rateLimited ? `${snapshot.rateMib.toFixed(1)} MB/s` : "不限"}</b></span>
+                  <span>峰值 <b className="text-ink">{formatRate(torrentMode ? Math.max(0, ...speedSeries) : (snapshot?.peakBps ?? 0))}</b></span>
+                  <span>均值 <b className="text-ink">{formatRate(torrentMode ? (pt.snapshot?.averageBps ?? 0) : (snapshot?.avgBps ?? 0))}</b></span>
+                  <span>限速 <b className="text-ink">{torrentMode ? (rateMib > 0 ? `${rateMib.toFixed(1)} MiB/s` : "不限") : snapshot?.rateLimited ? `${snapshot.rateMib.toFixed(1)} MB/s` : "不限"}</b></span>
                 </div>
                 <LineChart series={[{ label: "速率", color: "var(--accent)", values: speedSeries }]} height={190} />
               </div>
@@ -542,6 +752,8 @@ export default function App() {
                 </table>
                 {snapshot?.lastError ? <div className="mt-2 break-all text-[12px] text-bad">{snapshot.lastError}</div> : null}
               </div>
+                </>
+              )}
             </section>
           </div>
         ) : tab === "logs" ? (

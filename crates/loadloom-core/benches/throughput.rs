@@ -161,6 +161,11 @@ fn measure(port: u16, threads: u32) -> f64 {
             rate_mib: 0.0,
             limit_gb: 0.0,
             limit_minutes: 0.0,
+            ramp_up_secs: 0.0,
+            profile: Default::default(),
+            peer_urls: Vec::new(),
+            failure_stop_percent: 0.0,
+            latency_stop_ms: 0.0,
             authorized: true,
         })
         .expect("启动打流");

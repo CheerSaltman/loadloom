@@ -13,7 +13,8 @@ use std::path::PathBuf;
 use loadloom_core::{
     CoreError, EngineLimits, ErrorCount, HistoryPoint, LiveConfigPatch, LogEntry, LogLevel,
     MetricsSnapshot, NicAdapterClass, NicAdapterDto, NicAdapterHistory, NicEvent, NicEventKind,
-    NicLinkState, NicSeriesPoint, NicSnapshot, RunEvent, RunEventKind, RunPhase, StartRunRequest,
+    NicLinkState, NicSeriesPoint, NicSnapshot, PressureLevel, PtPhase, PtSnapshot, PtStartRequest,
+    RunEvent, RunEventKind, RunPhase, StartRunRequest, TrafficProfile,
 };
 use serde::Serialize;
 
@@ -135,6 +136,8 @@ fn empty_snapshot() -> MetricsSnapshot {
         errors: Vec::new(),
         last_error: String::new(),
         status: String::new(),
+        pressure_level: PressureLevel::Normal,
+        pressure_reason: String::new(),
         history: Vec::new(),
         latest: None,
     }
@@ -178,6 +181,11 @@ fn struct_wire_fields_match_typescript() {
             rate_mib: 0.0,
             limit_gb: 1.0,
             limit_minutes: 0.0,
+            ramp_up_secs: 0.0,
+            profile: Default::default(),
+            peer_urls: Vec::new(),
+            failure_stop_percent: 0.0,
+            latency_stop_ms: 0.0,
             authorized: true,
         },
     );
@@ -191,6 +199,23 @@ fn struct_wire_fields_match_typescript() {
             rate_mib: Some(100.0),
         },
     );
+
+    assert_aligned(
+        "PtStartRequest",
+        "PtStartRequest",
+        &PtStartRequest {
+            source: "magnet:?xt=urn:btih:test".into(),
+            max_connections: 180,
+            ram_mib: 512,
+            duration_secs: 600,
+            max_download_gib: 10.0,
+            rate_mib: 0.0,
+            stalled_peer_secs: 15,
+            authorized: true,
+        },
+    );
+
+    assert_aligned("PtSnapshot", "PtSnapshot", &PtSnapshot::default());
 
     assert_aligned(
         "HistoryPoint",
@@ -265,6 +290,8 @@ fn metrics_snapshot_frame_matches_typescript() {
             }],
             last_error: String::new(),
             status: "运行中".into(),
+            pressure_level: PressureLevel::Warning,
+            pressure_reason: "失败率接近阈值".into(),
             history: vec![HistoryPoint {
                 speed_bps: 1.0,
                 latency_ms: 2.0,
@@ -310,6 +337,33 @@ fn option_fields_serialize_as_explicit_null_not_omitted() {
 #[test]
 fn enum_literals_match_typescript_unions() {
     for (rust, literal) in [(RunPhase::Idle, "idle"), (RunPhase::Running, "running")] {
+        assert_eq!(wire_literal(&rust), literal);
+    }
+    for (rust, literal) in [
+        (TrafficProfile::HttpDownload, "httpDownload"),
+        (TrafficProfile::LocalPt, "localPt"),
+    ] {
+        assert_eq!(wire_literal(&rust), literal);
+    }
+    assert_eq!(
+        ts_string_union("PtPhase"),
+        [
+            PtPhase::Idle,
+            PtPhase::Starting,
+            PtPhase::Metadata,
+            PtPhase::Downloading,
+            PtPhase::Completed,
+            PtPhase::Failed,
+        ]
+        .iter()
+        .map(wire_literal)
+        .collect::<BTreeSet<_>>()
+    );
+    for (rust, literal) in [
+        (PressureLevel::Normal, "normal"),
+        (PressureLevel::Warning, "warning"),
+        (PressureLevel::Critical, "critical"),
+    ] {
         assert_eq!(wire_literal(&rust), literal);
     }
     assert_eq!(
@@ -425,6 +479,10 @@ fn start_run_request_defaults_are_backend_owned() {
     assert_eq!(minimal.threads, 0);
     assert_eq!(minimal.limit_gb, 0.0);
     assert_eq!(minimal.limit_minutes, 0.0);
+    assert_eq!(minimal.profile, TrafficProfile::HttpDownload);
+    assert!(minimal.peer_urls.is_empty());
+    assert_eq!(minimal.failure_stop_percent, 0.0);
+    assert_eq!(minimal.latency_stop_ms, 0.0);
 }
 
 #[test]
@@ -434,6 +492,8 @@ fn every_contract_type_is_covered_by_a_bindings_interface() {
     for name in [
         "EngineLimits",
         "StartRunRequest",
+        "PtStartRequest",
+        "PtSnapshot",
         "LiveConfigPatch",
         "HistoryPoint",
         "ErrorCount",
@@ -453,6 +513,9 @@ fn every_contract_type_is_covered_by_a_bindings_interface() {
     }
     for name in [
         "RunPhase",
+        "TrafficProfile",
+        "PressureLevel",
+        "PtPhase",
         "LogLevel",
         "RunEventKind",
         "NicAdapterClass",

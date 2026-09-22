@@ -16,6 +16,8 @@ export interface EngineLimits {
   tickMs: number;
 }
 
+export type TrafficProfile = "httpDownload" | "localPt";
+
 /** Command `start_run` 入参。 */
 export interface StartRunRequest {
   url: string;
@@ -23,6 +25,15 @@ export interface StartRunRequest {
   rateMib: number;
   limitGb: number;
   limitMinutes: number;
+  /** 从 1 线程平滑升至目标并发的时长；0 表示立即升至目标。 */
+  rampUpSecs: number;
+  profile: TrafficProfile;
+  /** PT 仿真的额外局域网 peer；主 URL 始终是第一个 peer。 */
+  peerUrls: string[];
+  /** 失败率熔断阈值（百分比）；0 表示关闭。 */
+  failureStopPercent: number;
+  /** 首包时延持续熔断阈值（毫秒）；0 表示关闭。 */
+  latencyStopMs: number;
   authorized: boolean;
 }
 
@@ -46,6 +57,58 @@ export interface ErrorCount {
 }
 
 export type RunPhase = "idle" | "running";
+export type PressureLevel = "normal" | "warning" | "critical";
+
+export interface PtStartRequest {
+  source: string;
+  maxConnections: number;
+  ramMib: number;
+  durationSecs: number;
+  maxDownloadGib: number;
+  rateMib: number;
+  stalledPeerSecs: number;
+  authorized: boolean;
+}
+
+export type PtPhase = "idle" | "starting" | "metadata" | "downloading" | "completed" | "failed";
+
+export interface PtSnapshot {
+  seq: number;
+  phase: PtPhase;
+  name: string;
+  infoHash: string;
+  elapsedSecs: number;
+  progressPercent: number;
+  totalBytes: number;
+  wireBytes: number;
+  verifiedBytes: number;
+  wastedBytes: number;
+  speedBps: number;
+  averageBps: number;
+  activePeers: number;
+  pendingPeers: number;
+  halfOpenPeers: number;
+  connectedSeeders: number;
+  usefulPeers: number;
+  stalledPeers: number;
+  peerHandshakes: number;
+  closedPeers: number;
+  deadPeers: number;
+  deadPeerPercent: number;
+  trackerErrors: number;
+  trackerSuccesses: number;
+  goodPieces: number;
+  badPieces: number;
+  ramUsedBytes: number;
+  ramPeakBytes: number;
+  ramLimitBytes: number;
+  storageErrors: number;
+  pressureLevel: PressureLevel;
+  pressureReason: string;
+  status: string;
+  lastError: string;
+  payloadPersistence: string;
+}
 
 /** Command `get_snapshot` 返回 / Event Channel 帧。 */
 export interface MetricsSnapshot {
@@ -69,6 +132,8 @@ export interface MetricsSnapshot {
   errors: ErrorCount[];
   lastError: string;
   status: string;
+  pressureLevel: PressureLevel;
+  pressureReason: string;
   history: HistoryPoint[];
   latest: HistoryPoint | null;
 }
@@ -243,6 +308,9 @@ export const commands = {
   stopRun: (reason?: string) => invoke<void>("stop_run", { reason: reason ?? null }),
   setLiveConfig: (patch: LiveConfigPatch) =>
     invoke<void>("set_live_config", { patch }),
+  startPt: (request: PtStartRequest) => invoke<void>("start_pt", { request }),
+  stopPt: () => invoke<void>("stop_pt"),
+  getPtSnapshot: () => invoke<PtSnapshot>("get_pt_snapshot"),
   /** 实际生效的日志文件路径；完全无法落盘时为 null。 */
   getLogPath: () => invoke<string | null>("get_log_path"),
   /** 在资源管理器中打开实际生效的日志目录。 */
@@ -272,6 +340,13 @@ export const commands = {
     const channel = new Channel<MetricsSnapshot>();
     channel.onmessage = onFrame;
     return invoke<void>("subscribe_metrics", { channel });
+  },
+
+  /** 真实 BitTorrent sidecar 指标推流（500ms 一帧）。 */
+  subscribePt: (onFrame: (frame: PtSnapshot) => void) => {
+    const channel = new Channel<PtSnapshot>();
+    channel.onmessage = onFrame;
+    return invoke<void>("subscribe_pt", { channel });
   },
 
   /** 网卡监测推流订阅（后端每 500ms 推一帧）。 */

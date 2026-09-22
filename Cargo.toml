@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/loadloom-core", "crates/nicmon", "src-tauri"]
 
 [workspace.package]
-version = "0.4.6"
+version = "0.4.7"
 edition = "2021"
 # 与 rust-toolchain.toml 固定的编译器一致；下调前需用 `cargo msrv --bisect` 实测。
 rust-version = "1.98"

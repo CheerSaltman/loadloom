@@ -52,6 +52,12 @@ pub mod cfg {
     pub const CLAMPED: &str = "CFG-010";
     /// 运行中的实时调整已生效。
     pub const LIVE_APPLIED: &str = "CFG-011";
+    /// 渐进升压计划已开始。
+    pub const RAMP_STARTED: &str = "CFG-012";
+    /// 渐进升压计划已完成。
+    pub const RAMP_COMPLETED: &str = "CFG-013";
+    /// 本地 PT 模式包含公网或非字面量局域网地址，被拒绝。
+    pub const PT_NOT_LOCAL: &str = "CFG-014";
 }
 
 /// 运行生命周期。
@@ -66,6 +72,10 @@ pub mod run {
     pub const ALREADY_RUNNING: &str = "RUN-004";
     /// 生效参数快照（用于事后复现当次运行的配置）。
     pub const CONFIG: &str = "RUN-005";
+    /// 压力监测进入预警状态。
+    pub const PRESSURE_WARNING: &str = "RUN-006";
+    /// 压力保护器达到熔断阈值并停止。
+    pub const PRESSURE_STOPPED: &str = "RUN-007";
 }
 
 /// 网络请求与重试。
@@ -140,11 +150,16 @@ pub const ALL: &[&str] = &[
     cfg::NON_FINITE,
     cfg::CLAMPED,
     cfg::LIVE_APPLIED,
+    cfg::RAMP_STARTED,
+    cfg::RAMP_COMPLETED,
+    cfg::PT_NOT_LOCAL,
     run::STARTED,
     run::STOPPED,
     run::AUTO_STOPPED,
     run::ALREADY_RUNNING,
     run::CONFIG,
+    run::PRESSURE_WARNING,
+    run::PRESSURE_STOPPED,
     net::HTTP_STATUS,
     net::REQUEST_FAILED,
     net::STREAM_BROKEN,

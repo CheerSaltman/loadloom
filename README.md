@@ -14,6 +14,7 @@ LoadLoom 分为三层：
 - **`loadloom-core`** —— 纯 Rust 库，零 GUI 依赖，不依赖窗口、浏览器或事件循环，可在 CI、容器、无头服务器中编译、测试、运行。
 - **`src-tauri`** —— 原生桌面外壳（Tauri v2），只做 IPC 桥接。
 - **`src`** —— React 19 前端，只做展示与参数下发。
+- **`sidecars/loadloom-pt`** —— Go BitTorrent 引擎，负责 DHT / PEX / uTP / TCP、RAM-only piece 存储和 Peer 健康分析。
 
 两端的通信契约定义在 `contract.rs`，前端 `src/bindings.ts` 是它的手写镜像，由测试逐字段校验。
 
@@ -46,7 +47,11 @@ LoadLoom 分为三层：
 | --- | --- |
 | **无头核心** | `loadloom-core` 依赖闭包内没有任何 GUI / 渲染库，可在无窗口环境完整跑通真实打流 |
 | **并发梯度** | 1–32 个 worker，运行中拖动滑块即时生效，无需停止重来 |
+| **局域网分片仿真** | 对本机或局域网多个 HTTP Peer 轮转发起 256 KiB–2 MiB Range 分片请求；拒绝域名和公网 IP |
+| **真实公网 PT** | 接受 magnet 或公开 `.torrent` URL，启用 DHT / PEX / uTP / TCP 和 8–500 Peer 连接；payload 只进 RAM，piece 校验后立即丢弃 |
+| **Peer 健康分析** | 统计握手、半开连接、有效/卡死/死 Peer、连接淘汰、Tracker 成败、坏块和浪费流量；30 秒协议 keepalive |
 | **全局限速** | 令牌桶，`0` 表示不限速，上限 4096 MiB/s，运行中可调 |
+| **压力保护** | 监测请求失败率与持续首包时延，达到阈值自动熔断；界面显示正常 / 预警 / 已熔断及原因 |
 | **自动停止** | 流量阈值（GB）与时长阈值（分钟）各自独立生效，填 `0` 表示该项关闭 |
 | **实时推流** | 指标每 250 ms 推送，前端零轮询；带单调 `seq` 序号去重 |
 | **错误分类** | 按码聚合：`TIMEOUT` / `CONNECT_FAILED` / `BODY_STREAM` / `DECODE_ERROR` / `REDIRECT_ERROR` / `REQUEST_ERROR` / `UNKNOWN` |
@@ -96,8 +101,12 @@ LoadLoom 分为三层：
 | 参数 | 怎么填 | 注意 |
 | --- | --- | --- |
 | **目标 URL** | 你要测的完整地址 | 建议先用你**自己**的服务试手 |
+| **流量模型** | HTTP 下载、局域网分片仿真或真实公网 PT | 公网 PT 建议只使用 Ubuntu / Debian 等合法公开发行版 |
 | **并发** | 1–32 | 从小往大加。回环地址上的瓶颈通常在测试机自身 |
+| **渐进升压** | 秒，`0` = 关闭 | 从 1 worker 逐步升到目标并发，减少瞬时冲击 |
 | **限速** | MiB/s，`0` = 不限 | 想测"稳定带宽下的表现"就设上限；想测吞吐上限就填 `0` |
+| **失败率熔断** | 百分比，`0` = 关闭 | 至少采集 20 次请求后生效；达到阈值自动停止 |
+| **时延熔断** | 毫秒，`0` = 关闭 | 首包时延连续超标约 1 秒后自动停止，短暂尖峰只预警 |
 | **停止条件 · 流量** | GB，`0` = 关闭 | 与时长条件互相独立，任一满足即自动停止 |
 | **停止条件 · 时长** | 分钟，`0` = 关闭 | 长跑建议设个上限，避免忘记 |
 
@@ -106,6 +115,7 @@ LoadLoom 分为三层：
 点「开始」后：
 
 - **指标区**每 250 ms 刷新一次：实时速率、在飞请求数、已传字节、失败计数。
+- **压力保护卡片**显示当前等级和判定原因；预警只记录日志，达到熔断条件才自动停止。
 - **折线图**保留最近 120 个采样点，握手时一次性下发历史，之后只推增量。
 - **运行日志页**展示引擎日志与错误明细，同一份内容也落盘到日志文件。
 
@@ -137,11 +147,19 @@ LoadLoom 分为三层：
 监测范围默认勾选物理网卡，可手动增删（虚拟网卡 / 隧道 / 回环各有分类标签）。
 监测独立于打流：不打流时它也在跑，停止打流后仍然继续。
 
-### 7. 排障
+### 7. 单机无线网卡 + 路由器的真实 PT 自测
+
+选择「真实公网 PT Swarm」，粘贴合法公开资源的 magnet 或 `.torrent` URL。默认最多 180 个 Peer、512 MiB RAM；Go sidecar 不创建下载文件，不上传，piece 通过哈希校验后立即释放内存。界面同时显示有效速率、线速字节、RAM 峰值、Peer 半开/卡死/死链比例和 Tracker 状态。
+
+只有一台电脑、一张无线网卡和一个路由器时，结果必然是**无线网卡 + 路由器 + 宽带 + 公网 swarm 的端到端上限**，无法从单端证明路由器绝不是瓶颈。应结合「网卡监测」判断：RX 利用率接近 100% 且无错误/丢弃，才说明无线链路较可能到顶；利用率低而死链率、半开连接或 Tracker 错误高，则更可能是 swarm、宽带或路由器 NAT 限制。
+
+### 8. 排障
 
 | 现象 | 先看哪里 |
 | --- | --- |
 | 失败数一直涨 | 「运行日志」页里的错误码：`CONNECT_FAILED` 多半是网络/端口/证书，`TIMEOUT` 多半是目标扛不住或丢包 |
+| PT 模式拒绝启动 | 目标或额外 Peer 不是字面量局域网地址；为防 DNS 重绑定，此模式不接受域名 |
+| 压力保护自动停止 | 看压力卡片与 `RUN-007` 日志：区分失败率熔断和持续首包时延熔断 |
 | 速率上不去 | 并发加到 8 以上往往收益就很小；先确认不是测试机 CPU 或目标端先到瓶颈 |
 | 速率突然掉底 / 断流 | 「网卡监测」页：链路是否断开、协商速率是否掉档（如 1 Gbps → 100 Mbps）、有无丢弃 / 错误尖峰 |
 | 界面没反应 | 看托盘图标 —— 窗口可能被收起来了，进程还活着 |
@@ -225,7 +243,7 @@ cargo test --locked -p loadloom-core     # 无头核心全部测试，无需图�
 
 ## 从源码构建
 
-**前置**：Rust（工具链版本由 `rust-toolchain.toml` 固定）、Node.js ≥ 20、Windows 上需 WebView2 Runtime。
+**前置**：Rust（工具链版本由 `rust-toolchain.toml` 固定）、Node.js ≥ 20、Go ≥ 1.24，以及 Windows WebView2 Runtime。
 
 ```bash
 git clone https://github.com/CheerSaltman/loadloom.git
@@ -234,6 +252,8 @@ cd loadloom
 npm install
 npm run typecheck          # tsc --noEmit
 npm run build              # 产出前端 dist/
+npm run pt:test            # Go PT sidecar 测试
+npm run pt:build           # 构建 RAM-only BT sidecar
 
 cargo test --locked -p loadloom-core   # 无头核心全部测试，无需图形环境
 npm run desktop:dev        # 开发模式：热重载原生窗口
@@ -273,6 +293,7 @@ loadloom/
 │   ├── capabilities/default.json
 │   ├── icons/
 │   └── tauri.conf.json
+├── sidecars/loadloom-pt/         # Go：真实 BT swarm + RAM 校验后丢弃 + Peer 诊断
 ├── src/                          # React 前端
 │   ├── components/LineChart.tsx  # 自绘 Canvas 折线图（零第三方、零 CDN）
 │   ├── components/NicPanel.tsx   # 网卡监测页（利用率条 / 曲线 / 事件时间线）

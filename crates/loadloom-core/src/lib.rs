@@ -19,7 +19,8 @@ mod rate;
 pub use contract::{
     CoreError, EngineLimits, ErrorCount, HistoryPoint, LiveConfigPatch, LogEntry, LogLevel,
     MetricsSnapshot, NicAdapterClass, NicAdapterDto, NicAdapterHistory, NicEvent, NicEventKind,
-    NicLinkState, NicSeriesPoint, NicSnapshot, RunEvent, RunEventKind, RunPhase, StartRunRequest,
+    NicLinkState, NicSeriesPoint, NicSnapshot, PressureLevel, PtPhase, PtSnapshot, PtStartRequest,
+    RunEvent, RunEventKind, RunPhase, StartRunRequest, TrafficProfile,
 };
 pub use engine::Engine;
 pub use nic::NicMonitor;

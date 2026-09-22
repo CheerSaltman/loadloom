@@ -25,6 +25,15 @@ pub struct EngineLimits {
     pub tick_ms: u32,
 }
 
+/// 流量模型。`LocalPt` 只接受回环或私有地址，避免误把仿真流量发往公网。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum TrafficProfile {
+    #[default]
+    HttpDownload,
+    LocalPt,
+}
+
 /// 启动打流请求 —— Command `start_run` 的入参。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -43,6 +52,21 @@ pub struct StartRunRequest {
     /// 运行时长达到该值（分钟）自动停止，`0` 表示关闭。
     #[serde(default)]
     pub limit_minutes: f64,
+    /// 渐进升压时长（秒）。`0` 表示启动时立即达到目标并发。
+    #[serde(default)]
+    pub ramp_up_secs: f64,
+    /// 流量模型；PT 仿真会轮转多个局域网 peer，并请求不同字节区间。
+    #[serde(default)]
+    pub profile: TrafficProfile,
+    /// PT 仿真的额外 peer 地址，主 `url` 始终作为第一个 peer。
+    #[serde(default)]
+    pub peer_urls: Vec<String>,
+    /// 尝试数达到最小样本后，失败率达到该百分比自动熔断；`0` 表示关闭。
+    #[serde(default)]
+    pub failure_stop_percent: f64,
+    /// 首包时延连续超标约 1 秒后自动熔断；`0` 表示关闭。
+    #[serde(default)]
+    pub latency_stop_ms: f64,
     /// 授权确认门禁：未确认则拒绝启动。
     #[serde(default)]
     pub authorized: bool,
@@ -113,8 +137,95 @@ pub struct MetricsSnapshot {
     pub errors: Vec<ErrorCount>,
     pub last_error: String,
     pub status: String,
+    pub pressure_level: PressureLevel,
+    pub pressure_reason: String,
     pub history: Vec<HistoryPoint>,
     pub latest: Option<HistoryPoint>,
+}
+
+/// 压力监测等级。Critical 会触发自动停止，Warning 只告警。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum PressureLevel {
+    #[default]
+    Normal,
+    Warning,
+    Critical,
+}
+
+/// 真实 BitTorrent swarm 压测请求。负载数据只允许进入 RAM piece 缓冲，完成
+/// 哈希校验后立即丢弃；Go sidecar 不创建下载文件。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PtStartRequest {
+    pub source: String,
+    #[serde(default)]
+    pub max_connections: u32,
+    #[serde(default)]
+    pub ram_mib: u32,
+    #[serde(default)]
+    pub duration_secs: u32,
+    #[serde(default)]
+    pub max_download_gib: f64,
+    #[serde(default)]
+    pub rate_mib: f64,
+    #[serde(default)]
+    pub stalled_peer_secs: u32,
+    #[serde(default)]
+    pub authorized: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum PtPhase {
+    #[default]
+    Idle,
+    Starting,
+    Metadata,
+    Downloading,
+    Completed,
+    Failed,
+}
+
+/// Go PT sidecar 每 500 ms 推送的只读快照。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PtSnapshot {
+    pub seq: u64,
+    pub phase: PtPhase,
+    pub name: String,
+    pub info_hash: String,
+    pub elapsed_secs: f64,
+    pub progress_percent: f64,
+    pub total_bytes: u64,
+    pub wire_bytes: u64,
+    pub verified_bytes: u64,
+    pub wasted_bytes: u64,
+    pub speed_bps: f64,
+    pub average_bps: f64,
+    pub active_peers: u32,
+    pub pending_peers: u32,
+    pub half_open_peers: u32,
+    pub connected_seeders: u32,
+    pub useful_peers: u32,
+    pub stalled_peers: u32,
+    pub peer_handshakes: u64,
+    pub closed_peers: u64,
+    pub dead_peers: u64,
+    pub dead_peer_percent: f64,
+    pub tracker_errors: u64,
+    pub tracker_successes: u64,
+    pub good_pieces: u64,
+    pub bad_pieces: u64,
+    pub ram_used_bytes: u64,
+    pub ram_peak_bytes: u64,
+    pub ram_limit_bytes: u64,
+    pub storage_errors: u64,
+    pub pressure_level: PressureLevel,
+    pub pressure_reason: String,
+    pub status: String,
+    pub last_error: String,
+    pub payload_persistence: String,
 }
 
 /// 日志级别。

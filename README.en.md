@@ -14,6 +14,7 @@ LoadLoom is split into three layers:
 - **`loadloom-core`** — a pure Rust library with zero GUI dependencies. It needs no window, no browser and no event loop, so it compiles, tests and runs inside CI, containers and headless servers.
 - **`src-tauri`** — the native desktop shell (Tauri v2). It only bridges IPC.
 - **`src`** — a React 19 frontend responsible for rendering and passing parameters down.
+- **`sidecars/loadloom-pt`** — a Go BitTorrent engine for DHT / PEX / uTP / TCP, RAM-only piece storage, and peer-health analysis.
 
 The contract between the two sides is defined in `contract.rs`; the frontend's `src/bindings.ts` is a hand-written mirror of it, checked field by field by a test.
 
@@ -45,7 +46,11 @@ The contract between the two sides is defined in `contract.rs`; the frontend's `
 | --- | --- |
 | **Headless core** | `loadloom-core`'s dependency closure contains no GUI or rendering library, and it runs real traffic in a windowless environment |
 | **Concurrency ramp** | 1–32 workers; dragging the slider while a run is active takes effect immediately, no restart needed |
+| **LAN piece simulation** | Rotates 256 KiB–2 MiB HTTP Range requests across local/LAN peers; hostnames and public IPs are rejected |
+| **Real public BitTorrent** | Accepts magnets or public `.torrent` URLs with DHT / PEX / uTP / TCP and 8–500 peer connections; payload is held in RAM only and discarded after piece verification |
+| **Peer health analysis** | Reports handshakes, half-open/useful/stalled/dead peers, churn, tracker results, bad pieces, and wasted traffic; protocol keepalive is 30 seconds |
 | **Global rate limit** | Token bucket; `0` means unlimited, capped at 4096 MiB/s, adjustable mid-run |
+| **Pressure guard** | Watches request failure rate and sustained time-to-first-byte latency, then trips an automatic circuit breaker at the configured threshold |
 | **Auto-stop** | A byte threshold (GB) and a duration threshold (minutes) apply independently; `0` disables either one |
 | **Live streaming** | Metrics are pushed every 250 ms; the frontend never polls and drops out-of-order frames via a monotonic `seq` |
 | **Error classification** | Aggregated by code: `TIMEOUT` / `CONNECT_FAILED` / `BODY_STREAM` / `DECODE_ERROR` / `REDIRECT_ERROR` / `REQUEST_ERROR` / `UNKNOWN` |
@@ -95,8 +100,12 @@ The UI has an authorization checkbox:
 | Parameter | How to fill it | Notes |
 | --- | --- | --- |
 | **Target URL** | The full address you want to test | Practise against **your own** service first |
+| **Traffic profile** | HTTP download, LAN piece simulation, or real public BitTorrent | Use legitimate public content such as Ubuntu or Debian for public swarm tests |
 | **Concurrency** | 1–32 | Start small. Over loopback the bottleneck is usually the machine running the test |
+| **Ramp-up** | Seconds; `0` = off | Gradually raises load from one worker to the target concurrency |
 | **Rate limit** | MiB/s, `0` = unlimited | Set a cap to measure behaviour under a fixed bandwidth; leave `0` to find the ceiling |
+| **Failure-rate breaker** | Percent; `0` = off | Applies after at least 20 requests and stops the run when the threshold is reached |
+| **Latency breaker** | Milliseconds; `0` = off | Stops after TTFB remains above the threshold for about one second; shorter spikes only warn |
 | **Auto-stop · bytes** | GB, `0` = off | Independent of the duration threshold; either one triggers a stop |
 | **Auto-stop · duration** | Minutes, `0` = off | Set a cap for long runs so you do not forget about them |
 
@@ -105,6 +114,7 @@ The UI has an authorization checkbox:
 Once you press **Start**:
 
 - The **metrics panel** refreshes every 250 ms: current rate, in-flight requests, bytes sent, failure counts.
+- The **pressure guard card** shows normal, warning, or tripped state plus the reason; warnings are logged without stopping the run.
 - The **line chart** keeps the last 120 samples; the full history arrives once in the handshake frame, then only deltas are pushed.
 - The **Run log** page shows engine logs and error details, mirrored to the log file on disk.
 
@@ -139,11 +149,19 @@ The watched set defaults to physical NICs and can be edited by hand (virtual ada
 loopback each have a class tag). Monitoring is independent of the traffic run: it keeps sampling
 when no run is active and after a run stops.
 
-### 7. Troubleshooting
+### 7. Real BitTorrent self-test with one Wi-Fi adapter and one router
+
+Choose **Real public PT Swarm** and paste a legitimate public magnet or `.torrent` URL. The default is 180 peers with a 512 MiB RAM ceiling. The Go sidecar creates no download file and uploads nothing; each piece is released immediately after hash verification. The UI reports useful and wire rates, RAM peak, half-open/stalled/dead peers, and tracker health.
+
+With only one computer, one Wi-Fi adapter, and a router, the result is necessarily the end-to-end ceiling of the Wi-Fi link, router, ISP, and public swarm. A single endpoint cannot prove that the router is never the bottleneck. Compare it with NIC monitoring: RX utilization near 100% without errors/discards points toward the wireless link; low utilization with high dead-peer, half-open, or tracker-error counts points toward the swarm, ISP, or router NAT.
+
+### 8. Troubleshooting
 
 | Symptom | Where to look first |
 | --- | --- |
 | Failures keep climbing | Error codes on the **Run log** page: `CONNECT_FAILED` is usually network/port/certificate, `TIMEOUT` usually means the target is saturated or packets are dropped |
+| PT mode refuses to start | A target or peer is not a literal LAN address; hostnames are intentionally rejected to prevent DNS rebinding |
+| Pressure guard stopped the run | Check the pressure card and `RUN-007` log to distinguish a failure-rate trip from sustained TTFB latency |
 | Rate plateaus | Gains beyond 8 workers are typically small; first make sure the test machine or the target is not the bottleneck |
 | Rate suddenly collapses / stalls | **NIC monitoring** tab: is the link down, did the negotiated speed drop (e.g. 1 Gbps → 100 Mbps), are there discard / error spikes |
 | UI seems unresponsive | Check the tray icon — the window may be minimized while the process is alive |
@@ -227,7 +245,7 @@ A contract test failure looks like this:
 
 ## Building from source
 
-**Prerequisites**: Rust (the toolchain version is pinned by `rust-toolchain.toml`), Node.js ≥ 20, and the WebView2 Runtime on Windows.
+**Prerequisites**: Rust (pinned by `rust-toolchain.toml`), Node.js ≥ 20, Go ≥ 1.24, and the WebView2 Runtime on Windows.
 
 ```bash
 git clone https://github.com/CheerSaltman/loadloom.git
@@ -236,6 +254,8 @@ cd loadloom
 npm install
 npm run typecheck          # tsc --noEmit
 npm run build              # emits the frontend into dist/
+npm run pt:test            # tests the Go PT sidecar
+npm run pt:build           # builds the RAM-only BitTorrent sidecar
 
 cargo test --locked -p loadloom-core   # all core tests, no graphical environment needed
 npm run desktop:dev        # development: hot-reloading native window
@@ -275,6 +295,7 @@ loadloom/
 │   ├── capabilities/default.json
 │   ├── icons/
 │   └── tauri.conf.json
+├── sidecars/loadloom-pt/         # Go: real BT swarm + verify-and-discard RAM storage + peer diagnostics
 ├── src/                          # React frontend
 │   ├── components/LineChart.tsx  # hand-drawn Canvas chart (no third-party, no CDN)
 │   ├── components/NicPanel.tsx   # NIC monitoring page (utilization bars / chart / timeline)

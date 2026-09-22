@@ -28,6 +28,7 @@
 //! 退避等待有界且可被 `stop()` 打断。
 
 use std::collections::{HashMap, VecDeque};
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -38,7 +39,7 @@ use tokio::sync::broadcast;
 use crate::codes;
 use crate::contract::{
     CoreError, EngineLimits, HistoryPoint, LiveConfigPatch, LogEntry, LogLevel, MetricsSnapshot,
-    RunEvent, RunEventKind, RunPhase, StartRunRequest,
+    PressureLevel, RunEvent, RunEventKind, RunPhase, StartRunRequest, TrafficProfile,
 };
 use crate::metrics::Metrics;
 use crate::rate::RateLimiter;
@@ -66,6 +67,12 @@ const MAX_URL_LEN: usize = 2048;
 const MAX_LIMIT_GB: f64 = 1024.0 * 1024.0;
 /// 自动停止「时长上限」的硬上限（分钟，约 1 年）。
 const MAX_LIMIT_MINUTES: f64 = 365.0 * 24.0 * 60.0;
+/// 渐进升压最长允许 1 小时：足够覆盖预热测试，同时避免畸形 IPC 载荷留下永久任务。
+const MAX_RAMP_UP_SECS: f64 = 60.0 * 60.0;
+const MAX_PT_PEERS: usize = 32;
+const MIN_PRESSURE_ATTEMPTS: u64 = 20;
+const PRESSURE_LATENCY_TICKS: u32 = 4;
+const MAX_LATENCY_STOP_MS: f64 = 60_000.0;
 /// 连接超时。
 ///
 /// 与 [`READ_TIMEOUT`] 一起构成「请求不会无限挂起」的硬保证，任何降级路径
@@ -149,6 +156,108 @@ fn sanitize_limit(value: f64, ceiling: f64, label: &str) -> Result<f64, CoreErro
     Ok(value.min(ceiling))
 }
 
+/// 校验并收敛渐进升压时长（秒）。`<= 0` 表示关闭。
+fn sanitize_ramp_up_secs(value: f64) -> Result<f64, CoreError> {
+    if !value.is_finite() {
+        return Err(CoreError::InvalidInput(
+            "渐进升压时长必须是有限数字".to_owned(),
+        ));
+    }
+    if value <= 0.0 {
+        return Ok(0.0);
+    }
+    Ok(value.min(MAX_RAMP_UP_SECS))
+}
+
+fn sanitize_failure_stop_percent(value: f64) -> Result<f64, CoreError> {
+    if !value.is_finite() {
+        return Err(CoreError::InvalidInput(
+            "失败率熔断阈值必须是有限数字".to_owned(),
+        ));
+    }
+    if value <= 0.0 {
+        return Ok(0.0);
+    }
+    Ok(value.min(100.0))
+}
+
+fn sanitize_latency_stop_ms(value: f64) -> Result<f64, CoreError> {
+    if !value.is_finite() {
+        return Err(CoreError::InvalidInput(
+            "时延熔断阈值必须是有限数字".to_owned(),
+        ));
+    }
+    if value <= 0.0 {
+        return Ok(0.0);
+    }
+    Ok(value.min(MAX_LATENCY_STOP_MS))
+}
+
+/// PT 仿真只允许字面量回环/私有 IP 或 localhost；不接受域名，避免 DNS 重绑定
+/// 把“本地模式”悄悄导向公网。
+fn local_pt_targets(primary: &str, extras: &[String]) -> Result<Vec<String>, CoreError> {
+    let mut candidates = Vec::with_capacity(extras.len() + 1);
+    candidates.push(primary.to_owned());
+    candidates.extend(extras.iter().map(|value| value.trim().to_owned()));
+    candidates.retain(|value| !value.is_empty());
+    if candidates.len() > MAX_PT_PEERS {
+        return Err(CoreError::InvalidInput(format!(
+            "PT 仿真 peer 最多 {MAX_PT_PEERS} 个"
+        )));
+    }
+
+    let mut targets = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let parsed = reqwest::Url::parse(&candidate)
+            .map_err(|_| CoreError::InvalidInput(format!("PT peer 地址无效：{candidate}")))?;
+        if parsed.scheme() != "http" && parsed.scheme() != "https" {
+            return Err(CoreError::InvalidInput(format!(
+                "PT peer 仅支持 http/https：{candidate}"
+            )));
+        }
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| CoreError::InvalidInput(format!("PT peer 缺少主机：{candidate}")))?;
+        // `url::Url::host_str()` 对 IPv6 URL 可能保留 `[]`；`IpAddr::parse` 只接受
+        // 裸地址，因此在判定地址类别前去掉 URL 语法层的方括号。
+        let ip_literal = host
+            .strip_prefix('[')
+            .and_then(|value| value.strip_suffix(']'));
+        let local = host.eq_ignore_ascii_case("localhost")
+            || ip_literal
+                .unwrap_or(host)
+                .parse::<IpAddr>()
+                .is_ok_and(|ip| match ip {
+                    IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+                    IpAddr::V6(ip) => {
+                        ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local()
+                    }
+                });
+        if !local {
+            return Err(CoreError::InvalidInput(format!(
+                "PT 仿真仅允许 localhost、回环或私有 IP：{candidate}"
+            )));
+        }
+        if candidate.len() > MAX_URL_LEN {
+            return Err(CoreError::InvalidInput(format!(
+                "PT peer 地址过长：上限 {MAX_URL_LEN} 字节"
+            )));
+        }
+        if !targets.contains(&candidate) {
+            targets.push(candidate);
+        }
+    }
+    Ok(targets)
+}
+
+fn pt_piece_range(worker: u32, request_id: u64) -> String {
+    const PIECES: [u64; 4] = [256 * 1024, 512 * 1024, 1024 * 1024, 2 * 1024 * 1024];
+    let seed = request_id ^ (u64::from(worker) << 32);
+    let size = PIECES[jitter_ms(seed, PIECES.len() as u64) as usize];
+    let start = jitter_ms(seed ^ 0xA5A5_A5A5_5A5A_5A5A, 4096) * 256 * 1024;
+    format!("bytes={start}-{}", start + size - 1)
+}
+
 /// 自动停止判定：返回 `Some(原因)` 表示应当停止。
 ///
 /// 非有限阈值一律视为「未设置」：`NaN` 参与任何比较都为假，若不加判断，
@@ -184,6 +293,65 @@ fn success_rate(completed: u64, failures: u64) -> f64 {
         0.0
     } else {
         completed as f64 / attempts as f64 * 100.0
+    }
+}
+
+/// 失败率百分比（0..=100）。参数顺序与 [`success_rate`] 保持一致，避免调用处
+/// 通过交换参数来“借用”成功率公式，导致后续维护时误读。
+fn failure_rate(completed: u64, failures: u64) -> f64 {
+    let attempts = completed.saturating_add(failures);
+    if attempts == 0 {
+        0.0
+    } else {
+        failures as f64 / attempts as f64 * 100.0
+    }
+}
+
+/// 根据请求结果与连续高时延采样计算压力等级。保持为纯函数，确保熔断边界可以在
+/// 不产生真实网络流量的情况下做确定性测试。
+fn pressure_state(
+    failure_stop_percent: f64,
+    latency_stop_ms: f64,
+    latency_ticks: u32,
+    completed: u64,
+    failures: u64,
+    latency_ms: f64,
+) -> (PressureLevel, String) {
+    let attempts = completed.saturating_add(failures);
+    let failures_percent = failure_rate(completed, failures);
+    let failure_critical = failure_stop_percent > 0.0
+        && attempts >= MIN_PRESSURE_ATTEMPTS
+        && failures_percent >= failure_stop_percent;
+    let latency_critical = latency_stop_ms > 0.0 && latency_ticks >= PRESSURE_LATENCY_TICKS;
+    let failure_warning = failure_stop_percent > 0.0
+        && attempts >= MIN_PRESSURE_ATTEMPTS
+        && failures_percent >= failure_stop_percent * 0.8;
+    let latency_warning = latency_stop_ms > 0.0 && latency_ticks >= 2;
+
+    if failure_critical {
+        (
+            PressureLevel::Critical,
+            format!(
+                "失败率 {failures_percent:.1}% 达到熔断阈值 {failure_stop_percent:.1}%（样本 {attempts}）"
+            ),
+        )
+    } else if latency_critical {
+        (
+            PressureLevel::Critical,
+            format!("首包时延 {latency_ms:.1} ms 持续达到熔断阈值 {latency_stop_ms:.1} ms"),
+        )
+    } else if failure_warning {
+        (
+            PressureLevel::Warning,
+            format!("失败率 {failures_percent:.1}% 接近熔断阈值 {failure_stop_percent:.1}%"),
+        )
+    } else if latency_warning {
+        (
+            PressureLevel::Warning,
+            format!("首包时延 {latency_ms:.1} ms 正在接近持续熔断条件"),
+        )
+    } else {
+        (PressureLevel::Normal, "压力正常".to_owned())
     }
 }
 
@@ -225,6 +393,8 @@ struct Control {
     /// 之后用一个迟到的 `in_flight` 收尾把在途计数下溢成 `u32::MAX`。
     /// 有了代次，旧 worker 在下一次判定时就发现自己已经过期。
     run: AtomicU64,
+    /// 渐进升压计划代次。手动调整并发时递增，使旧计划立刻失效。
+    ramp: AtomicU64,
 }
 
 impl Control {
@@ -242,6 +412,18 @@ impl Control {
     fn is_active(&self, run: u64) -> bool {
         !self.stop.load(Ordering::Acquire) && self.run.load(Ordering::Acquire) == run
     }
+
+    fn begin_ramp(&self) -> u64 {
+        self.ramp.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    fn cancel_ramp(&self) {
+        self.ramp.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn ramp_is_current(&self, ramp: u64) -> bool {
+        self.ramp.load(Ordering::Acquire) == ramp
+    }
 }
 
 struct Inner {
@@ -253,6 +435,11 @@ struct Inner {
     rate_mib: f64,
     limit_gb: f64,
     limit_minutes: f64,
+    failure_stop_percent: f64,
+    latency_stop_ms: f64,
+    pressure_latency_ticks: u32,
+    pressure_level: PressureLevel,
+    pressure_reason: String,
     status: String,
     history: VecDeque<HistoryPoint>,
     speed_bps: f64,
@@ -274,6 +461,11 @@ impl Inner {
             rate_mib: 0.0,
             limit_gb: 0.0,
             limit_minutes: 0.0,
+            failure_stop_percent: 0.0,
+            latency_stop_ms: 0.0,
+            pressure_latency_ticks: 0,
+            pressure_level: PressureLevel::Normal,
+            pressure_reason: "压力正常".to_owned(),
             status: "准备就绪 · 等待开始".to_owned(),
             history: VecDeque::new(),
             speed_bps: 0.0,
@@ -626,13 +818,35 @@ impl Engine {
             codes::cfg::NON_FINITE,
             sanitize_limit(request.limit_minutes, MAX_LIMIT_MINUTES, "时长上限"),
         )?;
+        let ramp_up_secs = self.checked(
+            codes::cfg::NON_FINITE,
+            sanitize_ramp_up_secs(request.ramp_up_secs),
+        )?;
+        let failure_stop_percent = self.checked(
+            codes::cfg::NON_FINITE,
+            sanitize_failure_stop_percent(request.failure_stop_percent),
+        )?;
+        let latency_stop_ms = self.checked(
+            codes::cfg::NON_FINITE,
+            sanitize_latency_stop_ms(request.latency_stop_ms),
+        )?;
+        let targets = match request.profile {
+            TrafficProfile::HttpDownload => vec![url.clone()],
+            TrafficProfile::LocalPt => self.checked(
+                codes::cfg::PT_NOT_LOCAL,
+                local_pt_targets(&url, &request.peer_urls),
+            )?,
+        };
+        let targets = Arc::new(targets);
+        let starts_ramped = ramp_up_secs > 0.0 && threads > 1;
+        let initial_threads = if starts_ramped { 1 } else { threads };
 
         // 将“是否已运行”的检查和状态切换放在同一把锁内。Tauri command 可以并发
         // 调用，原先在这里分两次取锁会让两个 start 都观察到 Idle，继而各自拉起一组
         // worker。先标记 Running 后再释放锁，保证同一时刻只有一个调用能赢得启动权。
         //
         // 块的值是本轮运行代次，供下面的 worker 派发使用。
-        let run = {
+        let (run, ramp) = {
             let mut inner = self.inner_lock();
             if inner.running {
                 drop(inner);
@@ -647,18 +861,30 @@ impl Engine {
             // 代次在清掉 stop 之后递增：旧代次的 worker 即使醒来看到
             // `stop == false`，也会因为代次不匹配而退出，不会复活成多余并发。
             let run = self.control.begin_run();
-            self.control.threads.store(threads, Ordering::Release);
+            self.control
+                .threads
+                .store(initial_threads, Ordering::Release);
+            let ramp = self.control.begin_ramp();
             self.limiter.set_rate(mib_to_bps(rate_mib));
 
             inner.running = true;
             inner.url = url.clone();
             inner.started = Some(Instant::now());
             inner.elapsed_frozen = 0.0;
-            inner.threads = threads;
+            inner.threads = initial_threads;
             inner.rate_mib = rate_mib;
             inner.limit_gb = limit_gb;
             inner.limit_minutes = limit_minutes;
-            inner.status = "测试运行中 · 并发与限速可实时调整".to_owned();
+            inner.failure_stop_percent = failure_stop_percent;
+            inner.latency_stop_ms = latency_stop_ms;
+            inner.pressure_latency_ticks = 0;
+            inner.pressure_level = PressureLevel::Normal;
+            inner.pressure_reason = "压力正常".to_owned();
+            inner.status = if starts_ramped {
+                format!("渐进升压中 · 并发 {initial_threads}/{threads} · 限速可实时调整")
+            } else {
+                "测试运行中 · 并发与限速可实时调整".to_owned()
+            };
             inner.history.clear();
             inner.speed_bps = 0.0;
             inner.peak_bps = 0.0;
@@ -666,7 +892,7 @@ impl Engine {
             inner.samples = 0;
             inner.last_bytes = 0;
             inner.last_tick = Instant::now();
-            run
+            (run, ramp)
         };
 
         // 被收敛过就必须说清楚：限速值与安全停止边界是用户对第三方的承诺，
@@ -678,6 +904,13 @@ impl Engine {
             (request.limit_gb, limit_gb, "流量上限"),
             (request.limit_minutes, limit_minutes, "时长上限"),
             (request.rate_mib, rate_mib, "限速值"),
+            (request.ramp_up_secs, ramp_up_secs, "渐进升压时长"),
+            (
+                request.failure_stop_percent,
+                failure_stop_percent,
+                "失败率熔断阈值",
+            ),
+            (request.latency_stop_ms, latency_stop_ms, "时延熔断阈值"),
         ] {
             if applied != requested {
                 self.log_full(
@@ -692,9 +925,23 @@ impl Engine {
 
         for index in 0..MAX_WORKERS {
             let engine = Arc::clone(self);
-            let target = url.clone();
-            self.ex
-                .spawn(async move { worker(index, engine, target, run).await });
+            let targets = Arc::clone(&targets);
+            let profile = request.profile;
+            self.ex.spawn(async move {
+                worker(index, engine, targets, profile, run).await;
+            });
+        }
+
+        if starts_ramped {
+            self.log_full(
+                LogLevel::Info,
+                codes::cfg::RAMP_STARTED,
+                format!(
+                    "run={run} 渐进升压已开始 · 1 → {threads} 并发 · {:.1} 秒",
+                    ramp_up_secs
+                ),
+            );
+            self.spawn_ramp(run, ramp, threads, ramp_up_secs);
         }
 
         // 生效参数快照：事后复现一次运行需要的第一手材料。用户报「打流有问题」时，
@@ -703,10 +950,15 @@ impl Engine {
             LogLevel::Info,
             codes::run::CONFIG,
             format!(
-                "run={run} 生效参数 · 目标 {url} · 并发 {threads}/{MAX_WORKERS} · 限速 {} · 流量上限 {} · 时长上限 {} · HTTP 客户端 {}",
+                "run={run} 生效参数 · 目标 {url} · 模式 {:?} · peer {} · 并发 {threads}/{MAX_WORKERS} · 起始并发 {initial_threads} · 升压 {} · 限速 {} · 流量上限 {} · 时长上限 {} · 失败率熔断 {} · 时延熔断 {} · HTTP 客户端 {}",
+                request.profile,
+                targets.len(),
+                if starts_ramped { format!("{ramp_up_secs:.1} 秒") } else { "关闭".to_owned() },
                 rate_summary(rate_mib),
                 limit_summary(limit_gb, "GB"),
                 limit_summary(limit_minutes, "分钟"),
+                limit_summary(failure_stop_percent, "%"),
+                limit_summary(latency_stop_ms, "ms"),
                 if degraded { "已降级" } else { "正常" },
             ),
         );
@@ -716,6 +968,45 @@ impl Engine {
             format!("已开始打流：{url}（run={run}）"),
         );
         Ok(())
+    }
+
+    /// 在独立任务中把目标并发线性推进。worker 已在启动时全部创建，因此这里只改
+    /// 一个原子目标值；不会在升压过程中反复创建或销毁任务。
+    fn spawn_ramp(self: &Arc<Self>, run: u64, ramp: u64, target: u32, duration_secs: f64) {
+        let engine = Arc::clone(self);
+        self.ex.spawn(async move {
+            let started = Instant::now();
+            loop {
+                if !engine.control.is_active(run) || !engine.control.ramp_is_current(ramp) {
+                    return;
+                }
+                let elapsed = started.elapsed().as_secs_f64();
+                let progress = (elapsed / duration_secs).clamp(0.0, 1.0);
+                let active = ((target as f64 * progress).ceil() as u32).clamp(1, target);
+                engine.control.threads.store(active, Ordering::Release);
+                {
+                    let mut inner = engine.inner_lock();
+                    if !inner.running || !engine.control.ramp_is_current(ramp) {
+                        return;
+                    }
+                    inner.threads = active;
+                    inner.status = format!("渐进升压中 · 并发 {active}/{target} · 已进行 {elapsed:.1}/{duration_secs:.1} 秒");
+                }
+                if progress >= 1.0 {
+                    engine.log_full(
+                        LogLevel::Info,
+                        codes::cfg::RAMP_COMPLETED,
+                        format!("run={run} 渐进升压完成 · 已达到 {target} 并发"),
+                    );
+                    let mut inner = engine.inner_lock();
+                    if inner.running && engine.control.ramp_is_current(ramp) {
+                        inner.status = "测试运行中 · 并发与限速可实时调整".to_owned();
+                    }
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
     }
 
     /// 记录拒绝原因并同步广播，保证前端一定能看到失败原因。
@@ -867,6 +1158,7 @@ impl Engine {
         let mut inner = self.inner_lock();
         if let Some(value) = patch.threads {
             let value = value.clamp(1, MAX_WORKERS);
+            self.control.cancel_ramp();
             inner.threads = value;
             self.control.threads.store(value, Ordering::Release);
         }
@@ -943,6 +1235,8 @@ impl Engine {
             errors: self.metrics.error_snapshot(),
             last_error: self.metrics.last_error(),
             status: inner.status.clone(),
+            pressure_level: inner.pressure_level,
+            pressure_reason: inner.pressure_reason.clone(),
             history: if with_history {
                 inner.history.iter().copied().collect()
             } else {
@@ -954,7 +1248,7 @@ impl Engine {
 
     /// 周期性采集：计算速率、维护历史、判定自动停止条件、主动广播快照。
     fn tick(self: &Arc<Self>) {
-        let auto_stop = {
+        let (auto_stop, pressure_log) = {
             let mut inner = self.inner_lock();
             let now = Instant::now();
             let total_bytes = self.metrics.bytes.load(Ordering::Relaxed);
@@ -964,6 +1258,7 @@ impl Engine {
             inner.last_tick = now;
 
             let mut reason = None;
+            let mut pressure_log = None;
             if inner.running {
                 let speed = delta_bytes as f64 / delta_time;
                 inner.speed_bps = speed;
@@ -984,11 +1279,57 @@ impl Engine {
                     .unwrap_or(inner.elapsed_frozen);
                 reason =
                     decide_auto_stop(inner.limit_gb, inner.limit_minutes, total_bytes, elapsed);
+
+                let completed = self.metrics.completed.load(Ordering::Relaxed);
+                let failures = self.metrics.failures.load(Ordering::Relaxed);
+                let latency_ms = self.metrics.latency_ms();
+                if inner.latency_stop_ms > 0.0 && latency_ms >= inner.latency_stop_ms {
+                    inner.pressure_latency_ticks = inner.pressure_latency_ticks.saturating_add(1);
+                } else {
+                    inner.pressure_latency_ticks = 0;
+                }
+
+                let (level, pressure_reason) = pressure_state(
+                    inner.failure_stop_percent,
+                    inner.latency_stop_ms,
+                    inner.pressure_latency_ticks,
+                    completed,
+                    failures,
+                    latency_ms,
+                );
+
+                if level != inner.pressure_level {
+                    pressure_log = match level {
+                        PressureLevel::Warning => Some((
+                            LogLevel::Warn,
+                            codes::run::PRESSURE_WARNING,
+                            pressure_reason.clone(),
+                        )),
+                        PressureLevel::Critical => Some((
+                            LogLevel::Error,
+                            codes::run::PRESSURE_STOPPED,
+                            pressure_reason.clone(),
+                        )),
+                        PressureLevel::Normal => None,
+                    };
+                }
+                inner.pressure_level = level;
+                inner.pressure_reason = pressure_reason.clone();
+                if level == PressureLevel::Critical && reason.is_none() {
+                    reason = Some(format!("压力保护已熔断：{pressure_reason}"));
+                }
             } else {
                 inner.speed_bps = 0.0;
             }
-            reason.map(|reason| (self.control.run.load(Ordering::Acquire), reason))
+            (
+                reason.map(|reason| (self.control.run.load(Ordering::Acquire), reason)),
+                pressure_log,
+            )
         };
+
+        if let Some((level, code, message)) = pressure_log {
+            self.log_full(level, code, message);
+        }
 
         if let Some((run, reason)) = auto_stop {
             // 代次围栏：算原因与执行停止之间用户可能已经停止并重新启动，
@@ -1139,7 +1480,13 @@ async fn backoff(engine: &Engine, run: u64, index: u32, failures: u32) {
 ///
 /// `run` 是它所属的运行代次：任何一次 `start()` / `stop()` 都会让它作废，
 /// worker 随即退出。这是「实际并发不超过用户授权值」的硬保证。
-async fn worker(index: u32, engine: Arc<Engine>, url: String, run: u64) {
+async fn worker(
+    index: u32,
+    engine: Arc<Engine>,
+    targets: Arc<Vec<String>>,
+    profile: TrafficProfile,
+    run: u64,
+) {
     let Some(client) = engine.client.as_ref() else {
         return;
     };
@@ -1158,19 +1505,27 @@ async fn worker(index: u32, engine: Arc<Engine>, url: String, run: u64) {
         }
 
         request_id = request_id.wrapping_add(1);
-        let target = cache_busted_url(&url, index, request_id);
+        let peer_index =
+            (u64::from(index).wrapping_add(request_id) % targets.len() as u64) as usize;
+        let target = cache_busted_url(&targets[peer_index], index, request_id);
         let started = Instant::now();
         engine.metrics.request_started();
+
+        let mut request = client
+            .get(&target)
+            .header("Cache-Control", "no-cache, no-store, max-age=0")
+            .header("Pragma", "no-cache")
+            .header("Accept-Encoding", "identity");
+        if profile == TrafficProfile::LocalPt {
+            request = request
+                .header("Range", pt_piece_range(index, request_id))
+                .header("X-LoadLoom-Profile", "local-pt");
+        }
 
         // 在途请求与「停止」赛跑：停止生效后立刻丢下这次请求（并如实收尾在途
         // 计数），而不是让超时替用户决定流量什么时候停。
         let result = tokio::select! {
-            result = client
-                .get(&target)
-                .header("Cache-Control", "no-cache, no-store, max-age=0")
-                .header("Pragma", "no-cache")
-                .header("Accept-Encoding", "identity")
-                .send() => result,
+            result = request.send() => result,
             _ = wait_for_stop(&engine, run) => {
                 engine.metrics.request_finished();
                 return;
@@ -1480,6 +1835,76 @@ mod tests {
     }
 
     #[test]
+    fn local_pt_targets_accept_only_literal_lan_addresses_and_deduplicate() {
+        let peers = local_pt_targets(
+            "http://127.0.0.1:8080/file.bin",
+            &[
+                "http://192.168.1.20:8080/file.bin".to_owned(),
+                "http://10.0.0.8/piece".to_owned(),
+                "http://127.0.0.1:8080/file.bin".to_owned(),
+                "http://[::1]:8080/file.bin".to_owned(),
+            ],
+        )
+        .expect("回环和私有字面量地址应被接受");
+        assert_eq!(peers.len(), 4, "重复 peer 应被去重");
+
+        for public_or_named in [
+            "https://example.com/file.bin",
+            "http://8.8.8.8/file.bin",
+            "http://router.local/file.bin",
+        ] {
+            assert!(
+                local_pt_targets(public_or_named, &[]).is_err(),
+                "PT 模式不得接受公网或可被 DNS 重绑定的地址：{public_or_named}"
+            );
+        }
+    }
+
+    #[test]
+    fn pt_piece_ranges_are_bounded_and_vary() {
+        let ranges: std::collections::BTreeSet<String> =
+            (0..32).map(|id| pt_piece_range(3, id)).collect();
+        assert!(ranges.len() > 1, "分片请求不应固定命中同一个区间");
+        for range in ranges {
+            let bounds = range
+                .strip_prefix("bytes=")
+                .expect("必须是 HTTP Range 语法")
+                .split_once('-')
+                .expect("Range 必须同时包含起止偏移");
+            let start: u64 = bounds.0.parse().unwrap();
+            let end: u64 = bounds.1.parse().unwrap();
+            let size = end - start + 1;
+            assert!((256 * 1024..=2 * 1024 * 1024).contains(&size));
+            assert_eq!(start % (256 * 1024), 0, "分片起点应按 256 KiB 对齐");
+        }
+    }
+
+    #[test]
+    fn pressure_guard_waits_for_samples_warns_then_trips() {
+        assert_eq!(
+            pressure_state(20.0, 3_000.0, 0, 9, 10, 0.0).0,
+            PressureLevel::Normal,
+            "失败率样本不足时不得误熔断"
+        );
+        assert_eq!(
+            pressure_state(20.0, 3_000.0, 0, 84, 16, 0.0).0,
+            PressureLevel::Warning
+        );
+        assert_eq!(
+            pressure_state(20.0, 3_000.0, 0, 80, 20, 0.0).0,
+            PressureLevel::Critical
+        );
+        assert_eq!(
+            pressure_state(0.0, 3_000.0, 2, 0, 0, 3_500.0).0,
+            PressureLevel::Warning
+        );
+        assert_eq!(
+            pressure_state(0.0, 3_000.0, PRESSURE_LATENCY_TICKS, 0, 0, 3_500.0).0,
+            PressureLevel::Critical
+        );
+    }
+
+    #[test]
     fn start_rejects_degenerate_payloads_before_spawning_anything() {
         // 校验发生在 worker 派发之前，因此本测试不需要任何真实 IO。
         let engine = Engine::spawn();
@@ -1489,6 +1914,11 @@ mod tests {
             rate_mib: 0.0,
             limit_gb: 0.0,
             limit_minutes: 0.0,
+            ramp_up_secs: 0.0,
+            profile: Default::default(),
+            peer_urls: Vec::new(),
+            failure_stop_percent: 0.0,
+            latency_stop_ms: 0.0,
             authorized: true,
         };
 
@@ -1506,6 +1936,34 @@ mod tests {
         assert!(matches!(nan_limit, Err(CoreError::InvalidInput(_))));
         assert!(!engine.is_running());
 
+        let nan_ramp = engine.start(StartRunRequest {
+            ramp_up_secs: f64::NAN,
+            ..base.clone()
+        });
+        assert!(matches!(nan_ramp, Err(CoreError::InvalidInput(_))));
+        assert!(!engine.is_running());
+
+        let nan_failure_guard = engine.start(StartRunRequest {
+            failure_stop_percent: f64::NAN,
+            ..base.clone()
+        });
+        assert!(matches!(nan_failure_guard, Err(CoreError::InvalidInput(_))));
+        assert!(!engine.is_running());
+
+        let nan_latency_guard = engine.start(StartRunRequest {
+            latency_stop_ms: f64::NAN,
+            ..base.clone()
+        });
+        assert!(matches!(nan_latency_guard, Err(CoreError::InvalidInput(_))));
+        assert!(!engine.is_running());
+
+        let public_pt = engine.start(StartRunRequest {
+            profile: TrafficProfile::LocalPt,
+            ..base.clone()
+        });
+        assert!(matches!(public_pt, Err(CoreError::InvalidInput(_))));
+        assert!(!engine.is_running(), "公网 PT 载荷不得进入运行态");
+
         // 回归点：极小速率是合法 JSON，旧实现会让 `Duration::from_secs_f64`
         // 在 worker 里 panic（任务静默消失），这里必须能正常启动。
         engine
@@ -1516,6 +1974,47 @@ mod tests {
             .expect("1e-300 MiB/s 是合法载荷");
         assert!(engine.is_running());
         assert_eq!(engine.snapshot(false).rate_mib, 1e-300);
+        engine.stop("单测收尾");
+    }
+
+    #[test]
+    fn ramp_up_advances_workers_and_manual_threads_cancel_the_plan() {
+        let engine = Engine::spawn();
+        engine
+            .start(StartRunRequest {
+                url: "http://127.0.0.1:9/payload".to_owned(),
+                threads: 4,
+                rate_mib: 0.0,
+                limit_gb: 0.0,
+                limit_minutes: 0.0,
+                ramp_up_secs: 0.4,
+                profile: TrafficProfile::HttpDownload,
+                peer_urls: Vec::new(),
+                failure_stop_percent: 0.0,
+                latency_stop_ms: 0.0,
+                authorized: true,
+            })
+            .expect("渐进升压应能启动");
+
+        assert_eq!(engine.snapshot(false).threads, 1, "升压必须从单并发开始");
+        std::thread::sleep(Duration::from_millis(170));
+        assert!(
+            engine.snapshot(false).threads >= 2,
+            "升压过程中应逐步提高并发"
+        );
+
+        engine
+            .set_live(LiveConfigPatch {
+                threads: Some(3),
+                rate_mib: None,
+            })
+            .expect("手动调整应能接管升压计划");
+        std::thread::sleep(Duration::from_millis(350));
+        assert_eq!(
+            engine.snapshot(false).threads,
+            3,
+            "已取消的升压计划不得覆盖手动并发"
+        );
         engine.stop("单测收尾");
     }
 
@@ -1553,6 +2052,11 @@ mod tests {
             rate_mib: 0.0,
             limit_gb: 0.0,
             limit_minutes: 0.0,
+            ramp_up_secs: 0.0,
+            profile: Default::default(),
+            peer_urls: Vec::new(),
+            failure_stop_percent: 0.0,
+            latency_stop_ms: 0.0,
             authorized: true,
         };
 
@@ -1620,6 +2124,11 @@ mod tests {
                 rate_mib: 10.0,
                 limit_gb: 1.0,
                 limit_minutes: 0.0,
+                ramp_up_secs: 0.0,
+                profile: Default::default(),
+                peer_urls: Vec::new(),
+                failure_stop_percent: 0.0,
+                latency_stop_ms: 0.0,
                 authorized: true,
             })
             .expect("启动必须成功");
@@ -1681,6 +2190,11 @@ mod tests {
                 rate_mib: MAX_RATE_MIB * 1000.0,
                 limit_gb: 0.0,
                 limit_minutes: 0.0,
+                ramp_up_secs: 0.0,
+                profile: Default::default(),
+                peer_urls: Vec::new(),
+                failure_stop_percent: 0.0,
+                latency_stop_ms: 0.0,
                 authorized: true,
             })
             .expect("超范围但语义合法的限速应当被收敛后启动");

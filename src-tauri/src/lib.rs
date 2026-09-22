@@ -7,6 +7,7 @@
 //! * 把日志落盘并捕获 panic（见 [`logging`]）—— 保证任何异常都可事后分析。
 
 mod logging;
+mod pt;
 
 use std::sync::Arc;
 
@@ -17,7 +18,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use loadloom_core::{
     CoreError, Engine, EngineLimits, LiveConfigPatch, LogEntry, MetricsSnapshot, NicAdapterDto,
-    NicMonitor, NicSnapshot, StartRunRequest,
+    NicMonitor, NicSnapshot, PtSnapshot, PtStartRequest, StartRunRequest,
 };
 
 /// 日志流事件名。
@@ -31,6 +32,8 @@ pub struct AppState {
     /// 网卡链路监测器。与引擎并列而非嵌套：它有自己的采样周期与订阅者，
     /// 打流停不停都不影响它继续记录链路状态。
     pub nic: Arc<NicMonitor>,
+    /// 真实 BitTorrent Go sidecar。与 HTTP 引擎互斥运行，共用网卡监测。
+    pub pt: Arc<pt::PtManager>,
 }
 
 // ---------------------------------------------------------------------------
@@ -52,6 +55,11 @@ fn get_snapshot(with_history: bool, state: State<'_, AppState>) -> MetricsSnapsh
 /// 启动打流。失败时返回强类型 `CoreError`，前端可精确判别分支。
 #[tauri::command]
 fn start_run(request: StartRunRequest, state: State<'_, AppState>) -> Result<(), CoreError> {
+    if state.pt.is_running() {
+        return Err(CoreError::AlreadyRunning(
+            "真实 PT 压测正在运行，请先停止".to_owned(),
+        ));
+    }
     state.engine.start(request)
 }
 
@@ -84,6 +92,45 @@ fn subscribe_metrics(channel: Channel<MetricsSnapshot>, state: State<'_, AppStat
                     }
                 }
                 // 消费过慢导致丢帧：跳过旧帧继续，而不是中断推流。
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+/// 启动真实公网 BitTorrent swarm 压测。Go sidecar 只使用 RAM piece 存储。
+#[tauri::command]
+fn start_pt(request: PtStartRequest, state: State<'_, AppState>) -> Result<(), CoreError> {
+    if state.engine.is_running() {
+        return Err(CoreError::AlreadyRunning(
+            "HTTP 打流正在运行，请先停止".to_owned(),
+        ));
+    }
+    state.pt.start(request)
+}
+
+#[tauri::command]
+fn stop_pt(state: State<'_, AppState>) {
+    state.pt.stop();
+}
+
+#[tauri::command]
+fn get_pt_snapshot(state: State<'_, AppState>) -> PtSnapshot {
+    state.pt.snapshot()
+}
+
+#[tauri::command]
+fn subscribe_pt(channel: Channel<PtSnapshot>, state: State<'_, AppState>) {
+    let mut receiver = state.pt.subscribe();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match receiver.recv().await {
+                Ok(frame) => {
+                    if channel.send(frame).is_err() {
+                        break;
+                    }
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(_) => break,
             }
@@ -223,9 +270,11 @@ pub fn run() {
             // 网卡监测独立启动：它记录的是链路本身的状态，与是否正在打流无关。
             // 打流前后的链路抖动同样是解释吞吐曲线的关键证据。
             let nic = NicMonitor::spawn();
+            let pt = pt::PtManager::new();
             app.manage(AppState {
                 engine: Arc::clone(&engine),
                 nic: Arc::clone(&nic),
+                pt,
             });
 
             // ---- 日志落盘 + panic 捕获 ----
@@ -288,6 +337,10 @@ pub fn run() {
             stop_run,
             set_live_config,
             subscribe_metrics,
+            start_pt,
+            stop_pt,
+            get_pt_snapshot,
+            subscribe_pt,
             get_log_path,
             get_diagnostics,
             report_frontend_error,

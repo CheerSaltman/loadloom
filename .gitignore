@@ -6,6 +6,8 @@ Cargo.lock.bak
 # Tauri 构建期生成物（capability schema、图标中间产物等）
 /src-tauri/gen/
 /src-tauri/target/
+/src-tauri/binaries/*.exe
+/sidecars/loadloom-pt/bin/
 
 # ---------- Node / 前端 ----------
 node_modules/
