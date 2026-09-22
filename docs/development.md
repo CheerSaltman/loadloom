@@ -24,21 +24,26 @@ npm run desktop:build                      # 打包：exe + NSIS + MSI
 ## 质量门禁（提交前必过）
 
 ```bash
-cargo fmt --all --check                                          # 格式
+npm run build                                                     # 桌面壳编译期需要 dist/ 存在
+cargo fmt --all --check                                           # 格式
 cargo clippy --locked -p loadloom-core --all-targets -- -D warnings
-cargo test  --locked -p loadloom-core                             # 18 个测试，不需要图形环境
+cargo test  --locked -p loadloom-core                             # 无头核心：单元 + 契约 + 端到端
 cargo run   --locked --example headless_smoke -p loadloom-core     # 示例可运行
+cargo test  --locked -p loadloom-desktop --lib                     # 桌面壳：日志格式与体积轮转
+npm run typecheck                                                 # 前端类型检查
 ```
 
+各套件的测试数量会随改动增长，以命令输出为准 —— 这里刻意不写死总数，避免文档再次过期。
 任何一步失败都不要进入下一步。CI（`.github/workflows/ci.yml`）会把同样的门禁再跑一遍。
 
 ## 测试构成
 
-| 套件 | 数量 | 覆盖什么 |
-| --- | --- | --- |
-| `engine`（单元测试） | 6 | 限速器、指标聚合、自动停止、阶段迁移 |
-| `contract_wire` | 7 | 解析 `src/bindings.ts` 逐字段比对 serde 实产 JSON |
-| `headless_e2e` | 5 | 本地伪 origin 跑真实打流，含「裸线程无 Tokio 运行时」启动 |
+| 套件 | 覆盖什么 |
+| --- | --- |
+| `loadloom-core` 单元测试（`engine` / `rate` / `metrics`） | 缓存破坏参数、自动停止、环形历史、成功率、令牌桶原子镜像与容量、错误分布排序与截断、RFC3550 抖动递推 |
+| `contract_wire` | 解析 `src/bindings.ts` 逐字段比对 serde 实产 JSON |
+| `headless_e2e` | 本地伪 origin 跑真实打流，含「裸线程无 Tokio 运行时」启动、并发启动只放行一个 |
+| `loadloom-desktop` 单元测试（`logging`） | UTC 时间戳与闰日换算、级别标签定宽、行格式、两代体积轮转、启动归档超限旧日志、坏句柄降级不 panic |
 
 `crates/loadloom-core/benches/throughput.rs` 是基准台，默认被 `#[ignore]` 门控，需要显式启用：
 
@@ -60,11 +65,14 @@ scripts/make_icon.mjs           # 图标生成
 ## 发布流程
 
 1. 确认质量门禁全绿、`CHANGELOG.md` 已写好当版条目。
-2. 更新各处的版本号（`Cargo.toml` 工作区 `version`、`package.json`），提交。
-3. 打标签并推送：
+2. 更新版本号。**版本号只有一个权威源**：`Cargo.toml` 里 `[workspace.package] version` ——
+   `src-tauri/tauri.conf.json` 有意不写 `version` 字段，由 Tauri 回落到 `Cargo.toml`，
+   因此安装包文件名（`LoadLoom_<版本>_x64-*`）必然跟着权威源走，不会与 tag 脱节。
+   同时同步 `package.json` 的 `version`（npm 元数据）并刷新 `package-lock.json`。
+3. 打标签并推送。tag 必须与第 2 步的版本号一致，`release.yml` 会在编译前校验：
    ```bash
-   git tag -a v0.4.0 -m "LoadLoom v0.4.0"
-   git push origin v0.4.0
+   git tag -a v<版本> -m "LoadLoom v<版本>"
+   git push origin v<版本>
    ```
 4. 推送 tag 后无需人工出包：`.github/workflows/release.yml` 会在 tag 推送时自动跑核心测试与前端类型检查、
    构建并上传三个产物到对应 Release。

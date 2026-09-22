@@ -8,6 +8,45 @@
 - 待 `tauri-specta` 发布稳定版后，用生成的类型替换手写的 `src/bindings.ts`。
 - 将 `crates/loadloom-core/benches/throughput.rs` 升级为 criterion 基准，并接入历史基线对比。
 
+## [0.4.3] - 2026-09-22
+
+### 修复
+
+- **日志轮转在 Windows 上从第二次起静默失效**：`fs::rename` 覆盖已存在的
+  `loadloom.prev.log` 会失败（`ERROR_ALREADY_EXISTS`），旧实现没先删旧文件，
+  于是日志一旦超过 4 MB 就不再归档、无限增长。现在先删旧代再改名，并如实上报结果。
+- **轮转只在启动时判断**：旧实现仅在会话开始时看一次体积，长会话里日志同样会无限增长。
+  现在按累计写入字节在**写入路径**上触发。
+- **日志设施自身故障会让应用起不来**：`open_sink` 结尾的 `expect("无法创建日志文件")`
+  与「永不 panic」的模块约定自相矛盾 —— 磁盘满或权限不足本该降级为「只上屏」，
+  却直接让桌面壳启动失败。现在主目录不可写就退到临时目录，再不可写就只上屏。
+- **界面上的日志路径可能不是真的**：日志降级到临时目录后，`get_log_path` 仍上报
+  `%LOCALAPPDATA%` 下的路径。现在返回**实际生效**的文件，无法落盘时返回 `None`
+  （前端应显示「未落盘」）；`open_log_dir` 打开实际生效的目录。
+
+### 重构
+
+- `src-tauri/src/logging.rs` 按职责重排：纯函数区（时间戳换算、行格式化）不再接触文件系统，
+  `Sink` 成为唯一接触文件系统的类型，负责句柄、体积轮转与降级。
+- 日志级别不再以裸字符串在模块间传递：`write` 改收 `LogLevel`，定宽标签由单测锁定，
+  调用方不再需要自己拼 `"INFO "`。
+- 降级路径明确为「不丢日志优先」：归档失败时继续写入原文件（宁可超限也不丢），
+  句柄失效后下次写入自动重开。
+
+### 新增
+
+- `logging` 模块补上 7 个单元测试：UTC 时间戳与闰日换算、级别标签定宽、行格式、
+  两代轮转覆盖、启动时归档超限旧文件、坏句柄降级不 panic。测试总数 26 → 33。
+- CI 的 Windows `desktop` job 增加 `cargo test -p loadloom-desktop --lib`：
+  日志落在桌面壳里，这条 Windows 专属缺陷不可能被跑在 Linux 上的核心任务发现。
+
+### 变更
+
+- `src-tauri/tauri.conf.json` 不再写死 `version`，改由 Tauri 回落到 `Cargo.toml` 的版本号：
+  发布时只需改一处，安装包文件名不会与 tag 脱节。
+- `release.yml` 在编译前校验 tag 与 `Cargo.toml` 版本一致，避免到上传产物阶段才报错。
+- 修正 `benches/throughput.rs` 头部注释里的运行命令（`--test` 改为 `--bench`，与目录归属一致）。
+
 ## [0.4.2] - 2026-09-22
 
 ### 修复
@@ -77,6 +116,7 @@
 - 历史遗留的 GUI 与本地服务依赖（egui / eframe / webbrowser / axum）。
 - 界面上的技术标签。
 
+[0.4.3]: https://github.com/CheerSaltman/loadloom/releases/tag/v0.4.3
 [0.4.2]: https://github.com/CheerSaltman/loadloom/releases/tag/v0.4.2
 [0.4.1]: https://github.com/CheerSaltman/loadloom/releases/tag/v0.4.1
 [0.4.0]: https://github.com/CheerSaltman/loadloom/releases/tag/v0.4.0

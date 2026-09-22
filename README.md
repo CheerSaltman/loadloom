@@ -64,9 +64,9 @@ LoadLoom 分为三层：
 
 | 文件 | 适合谁 |
 | --- | --- |
-| `LoadLoom_0.4.0_x64-setup.exe` | **大多数用户**。NSIS 安装包，带开始菜单项与卸载程序 |
-| `LoadLoom_0.4.0_x64_en-US.msi` | 需要走企业组策略 / 静默部署（`msiexec /i`）的场景 |
-| `LoadLoom_0.4.0_x64-portable.exe` | 免安装绿色版，双击就跑 |
+| `LoadLoom_<版本>_x64-setup.exe` | **大多数用户**。NSIS 安装包，带开始菜单项与卸载程序 |
+| `LoadLoom_<版本>_x64_en-US.msi` | 需要走企业组策略 / 静默部署（`msiexec /i`）的场景 |
+| `LoadLoom_<版本>_x64-portable.exe` | 免安装绿色版，双击就跑 |
 
 > 系统要求：Windows 10/11 x64，需要 **WebView2 Runtime**（Windows 11 与较新的 Windows 10 已自带；若提示缺失，装一次 [Evergreen Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) 即可）。
 
@@ -80,7 +80,7 @@ LoadLoom 分为三层：
 
 ### 1. 启动
 
-安装后从开始菜单打开 **LoadLoom**，或直接双击 `LoadLoom_0.4.0_x64-portable.exe`。
+安装后从开始菜单打开 **LoadLoom**，或直接双击 `LoadLoom_<版本>_x64-portable.exe`。
 首次启动会创建日志目录：`%LOCALAPPDATA%\LoadLoom\logs\loadloom.log`。
 
 ### 2. 确认你已获得授权
@@ -213,7 +213,7 @@ npm install
 npm run typecheck          # tsc --noEmit
 npm run build              # 产出前端 dist/
 
-cargo test --locked -p loadloom-core   # 18 个测试，无需图形环境
+cargo test --locked -p loadloom-core   # 无头核心全部测试，无需图形环境
 npm run desktop:dev        # 开发模式：热重载原生窗口
 npm run desktop:build      # 打包：产出 exe + NSIS + MSI
 ```
@@ -222,8 +222,8 @@ npm run desktop:build      # 打包：产出 exe + NSIS + MSI
 
 ```text
 target/release/loadloom-desktop.exe                       ← 免安装可执行文件
-target/release/bundle/nsis/LoadLoom_0.4.0_x64-setup.exe   ← NSIS 安装包
-target/release/bundle/msi/LoadLoom_0.4.0_x64_en-US.msi    ← MSI 安装包
+target/release/bundle/nsis/LoadLoom_<版本>_x64-setup.exe   ← NSIS 安装包
+target/release/bundle/msi/LoadLoom_<版本>_x64_en-US.msi    ← MSI 安装包
 ```
 
 开发流程、质量门禁与发布步骤见 [docs/development.md](docs/development.md)。

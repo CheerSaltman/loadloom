@@ -3,7 +3,7 @@
 //! 默认 `#[ignore]`，需要显式运行：
 //!
 //! ```text
-//! cargo test -p loadloom-core --test throughput -- --ignored --nocapture
+//! cargo test -p loadloom-core --bench throughput -- --ignored --nocapture
 //! ```
 //!
 //! 它会连续跑多组并发并占满 CPU 数秒，所以不进默认测试集（默认集必须又快又稳）。
