@@ -215,6 +215,8 @@ fn struct_wire_fields_match_typescript() {
         "LogEntry",
         &LogEntry {
             level: LogLevel::Info,
+            code: "RUN-005".into(),
+            source: "crates/loadloom-core/src/engine.rs:1".into(),
             message: "hello".into(),
             at_ms: 42,
         },
@@ -225,6 +227,8 @@ fn struct_wire_fields_match_typescript() {
         "RunEvent",
         &RunEvent {
             kind: RunEventKind::Started,
+            code: "RUN-001".into(),
+            source: "crates/loadloom-core/src/engine.rs:1".into(),
             message: "go".into(),
             at_ms: 42,
         },

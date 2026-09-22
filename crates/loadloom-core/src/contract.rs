@@ -131,6 +131,13 @@ pub enum LogLevel {
 #[serde(rename_all = "camelCase")]
 pub struct LogEntry {
     pub level: LogLevel,
+    /// 稳定事件码（见 [`crate::codes`]），形如 `NET-002`；空串表示无码。
+    ///
+    /// 有了它，用户报障时不必复述整段中文文案：报出事件码即可精确定位到
+    /// 产生它的那一条代码分支（这是「可定位」的硬前提）。
+    pub code: String,
+    /// 产生这条日志的代码位置（`文件:行`），panic 由 shell 填充 `文件:行:列`。
+    pub source: String,
     pub message: String,
     /// 相对进程启动的毫秒时间戳。
     pub at_ms: u64,
@@ -151,6 +158,10 @@ pub enum RunEventKind {
 #[serde(rename_all = "camelCase")]
 pub struct RunEvent {
     pub kind: RunEventKind,
+    /// 稳定事件码（见 [`crate::codes`]）；拒绝事件沿用被拒原因对应的码。
+    pub code: String,
+    /// 产生这个事件的代码位置（`文件:行`）。
+    pub source: String,
     pub message: String,
     pub at_ms: u64,
 }

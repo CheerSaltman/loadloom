@@ -4,6 +4,7 @@ import {
   describeCoreError,
   events,
   type EngineLimits,
+  type FrontendErrorReport,
   type HistoryPoint,
   type LiveConfigPatch,
   type LogEntry,
@@ -14,11 +15,22 @@ import {
 
 export type ConnectionState = "connecting" | "live" | "down";
 
+/**
+ * 前端日志缓冲区上限。
+ *
+ * 无上限的数组在一场长跑里会被网络失败日志灌满（32 个 worker × 每秒多条），
+ * 最终把渲染拖垮 —— 排障工具不能变成新的故障源。超出后丢弃最旧的条目：
+ * 完整历史始终在磁盘日志里（`%LOCALAPPDATA%\LoadLoom\logs`）。
+ */
+const LOG_BUFFER_LIMIT = 2000;
+
 export interface EngineState {
   limits: EngineLimits | null;
   snapshot: MetricsSnapshot | null;
   history: HistoryPoint[];
   logs: LogEntry[];
+  /** 实际生效的日志文件路径（用于界面展示「日志在哪」）。 */
+  logPath: string | null;
   lastEvent: RunEvent | null;
   connection: ConnectionState;
   error: string | null;
@@ -26,6 +38,8 @@ export interface EngineState {
   stop: (reason?: string) => Promise<void>;
   patchLive: (patch: LiveConfigPatch) => Promise<void>;
   clearLogs: () => void;
+  /** 上报前端异常（写盘 + 崩溃报告），失败静默 —— 报错通道自身不该再弹错。 */
+  reportError: (report: FrontendErrorReport) => void;
   quit: () => Promise<void>;
 }
 
@@ -41,6 +55,7 @@ export function useEngine(): EngineState {
   const [snapshot, setSnapshot] = useState<MetricsSnapshot | null>(null);
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [logPath, setLogPath] = useState<string | null>(null);
   const [lastEvent, setLastEvent] = useState<RunEvent | null>(null);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [error, setError] = useState<string | null>(null);
@@ -56,6 +71,16 @@ export function useEngine(): EngineState {
   useEffect(() => {
     let disposed = false;
     const unlisteners: Array<() => void> = [];
+
+    // 日志路径单独取：即使这一项失败，也不该把整条推送链判断为断开。
+    void commands
+      .getLogPath()
+      .then((path) => {
+        if (!disposed) setLogPath(path);
+      })
+      .catch(() => {
+        if (!disposed) setLogPath(null);
+      });
 
     void (async () => {
       try {
@@ -81,7 +106,12 @@ export function useEngine(): EngineState {
 
         unlisteners.push(
           await events.onLog((entry) => {
-            setLogs((previous) => [...previous, entry]);
+            setLogs((previous) => {
+              const next = [...previous, entry];
+              return next.length > LOG_BUFFER_LIMIT
+                ? next.slice(next.length - LOG_BUFFER_LIMIT)
+                : next;
+            });
           }),
         );
         unlisteners.push(await events.onRunEvent((event) => setLastEvent(event)));
@@ -126,6 +156,10 @@ export function useEngine(): EngineState {
   }, []);
 
   const clearLogs = useCallback(() => setLogs([]), []);
+  const reportError = useCallback((report: FrontendErrorReport) => {
+    // 静默失败：异常上报是排障的最后一环，它自己再抛错只会制造新的异常风暴。
+    void commands.reportFrontendError(report).catch(() => undefined);
+  }, []);
   const quit = useCallback(() => commands.quitApp(), []);
 
   return {
@@ -133,6 +167,7 @@ export function useEngine(): EngineState {
     snapshot,
     history,
     logs,
+    logPath,
     lastEvent,
     connection,
     error,
@@ -140,6 +175,7 @@ export function useEngine(): EngineState {
     stop,
     patchLive,
     clearLogs,
+    reportError,
     quit,
   };
 }

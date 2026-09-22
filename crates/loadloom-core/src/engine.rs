@@ -27,7 +27,7 @@
 //! 运行期另有两条硬约束：worker 只认同一个**运行代次**（见 [`Control`]），
 //! 退避等待有界且可被 `stop()` 打断。
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -35,6 +35,7 @@ use std::time::{Duration, Instant};
 use futures_util::StreamExt;
 use tokio::sync::broadcast;
 
+use crate::codes;
 use crate::contract::{
     CoreError, EngineLimits, HistoryPoint, LiveConfigPatch, LogEntry, LogLevel, MetricsSnapshot,
     RunEvent, RunEventKind, RunPhase, StartRunRequest,
@@ -392,6 +393,11 @@ pub struct Engine {
     /// spawn 之后才订阅日志流的），`broadcast::Sender::send` 会直接丢弃它 ——
     /// 一条"已降级"的告警就此消失，正是本模块最反对的静默。
     client_note: Mutex<Option<String>>,
+    /// 失败日志节流器：`"{代次}:{事件码}" -> 已出现次数`（见 [`FAILURE_LOG_BURST`]）。
+    ///
+    /// 键里带代次，新一代运行天然是一份新配额，无需在 `start()` 里清理；
+    /// 条目数只与「代次 × 错误码」成正比，异常增长时整体清空兜底。
+    failure_log_seen: Mutex<HashMap<String, u64>>,
     inner: Mutex<Inner>,
     epoch: Instant,
     seq: AtomicU64,
@@ -427,6 +433,7 @@ impl Engine {
             limiter: Arc::new(RateLimiter::new()),
             client,
             client_note: Mutex::new(client_note),
+            failure_log_seen: Mutex::new(HashMap::new()),
             inner: Mutex::new(Inner::idle()),
             epoch: Instant::now(),
             seq: AtomicU64::new(0),
@@ -434,7 +441,14 @@ impl Engine {
             log_tx,
             event_tx,
         });
-        engine.log(LogLevel::Info, "打流引擎已就绪（无头模式）");
+        engine.log_full(
+            LogLevel::Info,
+            codes::sys::ENGINE_READY,
+            format!(
+                "打流引擎已就绪（无头模式）· 并发上限 {MAX_WORKERS} · 限速上限 {MAX_RATE_MIB:.0} MiB/s · 采样周期 {} ms",
+                TICK.as_millis()
+            ),
+        );
         let weak = Arc::downgrade(&engine);
         engine.ex.spawn(async move {
             let mut ticker = tokio::time::interval(TICK);
@@ -469,30 +483,91 @@ impl Engine {
         self.epoch.elapsed().as_millis() as u64
     }
 
-    /// 从外部写入一条日志（例如桌面壳捕获到的 panic）。
+    /// 从外部写入一条日志（例如桌面壳捕获到的 panic、前端 JS 异常）。
     ///
     /// 复用同一条日志流，使前端「运行日志」视图与落盘日志都能看到崩溃原因，
-    /// 而不是让 panic 信息只存在于没人会去看的 stderr 里。
+    /// 而不是让 panic 信息只存在于没人会去看的 stderr 里。`source` 同样由
+    /// `#[track_caller]` 记成调用点，壳层不必自己拼位置。
+    #[track_caller]
     pub fn log_external(&self, level: LogLevel, message: impl Into<String>) {
-        self.log(level, message);
+        self.log_full(level, "", message);
     }
 
-    fn log(&self, level: LogLevel, message: impl Into<String>) {
+    /// 带稳定事件码的日志（自有代码一律走这里）。
+    ///
+    /// `source` 取**调用点**的 `文件:行`（`#[track_caller]`），而不是让每个调用方
+    /// 手写常量：手写的位置会随代码移动而失效，日志反而变成误导排障的假线索。
+    #[track_caller]
+    fn log_full(&self, level: LogLevel, code: &str, message: impl Into<String>) {
+        let location = std::panic::Location::caller();
         let entry = LogEntry {
             level,
+            code: code.to_owned(),
+            source: format!("{}:{}", location.file(), location.line()),
             message: message.into(),
             at_ms: self.at_ms(),
         };
         let _ = self.log_tx.send(entry);
     }
 
-    fn emit_event(&self, kind: RunEventKind, message: impl Into<String>) {
+    /// 广播生命周期事件（带事件码与调用点，口径与日志完全一致）。
+    #[track_caller]
+    fn emit_event(&self, kind: RunEventKind, code: &str, message: impl Into<String>) {
+        let location = std::panic::Location::caller();
         let event = RunEvent {
             kind,
+            code: code.to_owned(),
+            source: format!("{}:{}", location.file(), location.line()),
             message: message.into(),
             at_ms: self.at_ms(),
         };
         let _ = self.event_tx.send(event);
+    }
+
+    /// 失败日志的节流阀：返回 `Some(第几次)` 表示本次值得记录。
+    ///
+    /// 规则：同一 `key` 的前 [`codes::LOG_BURST`] 次完整记录，之后只记 10 的幂
+    /// （第 10、100、1000… 次）。既抓住**首个故障现场**，又留下一条「故障在持续、
+    /// 量级在涨」的轨迹，而不会让同一句话在几秒内把主日志刷爆、把故障前的上下文
+    /// 挤出轮转窗口。
+    fn failure_log_slot(&self, key: &str) -> Option<u64> {
+        let mut seen = self
+            .failure_log_seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if seen.len() > 1024 {
+            seen.clear();
+        }
+        let count = seen.entry(key.to_owned()).or_insert(0);
+        *count += 1;
+        let count = *count;
+        if codes::is_log_milestone(count) {
+            Some(count)
+        } else {
+            None
+        }
+    }
+
+    /// 记录一次网络失败（按代次 + 事件码节流）。
+    ///
+    /// 消息里显式带 `run=` 与 `worker#`：「哪一代、哪个 worker 出的问题」是
+    /// 复现并发类缺陷的必要上下文，缺了它就只能靠猜。
+    #[track_caller]
+    fn note_failure(&self, level: LogLevel, run: u64, worker: u32, code: &str, detail: &str) {
+        let key = format!("{run}:{code}");
+        let Some(count) = self.failure_log_slot(&key) else {
+            return;
+        };
+        let suffix = if count > codes::LOG_BURST {
+            format!("（同类失败第 {count} 次，日志按里程碑节流）")
+        } else {
+            String::new()
+        };
+        self.log_full(
+            level,
+            code,
+            format!("run={run} worker#{worker} {detail}{suffix}"),
+        );
     }
 
     fn inner_lock(&self) -> MutexGuard<'_, Inner> {
@@ -507,39 +582,50 @@ impl Engine {
     pub fn start(self: &Arc<Self>, request: StartRunRequest) -> Result<(), CoreError> {
         let url = request.url.trim().to_owned();
         if url.is_empty() {
-            return Err(self.reject(CoreError::InvalidInput("请填写目标地址".to_owned())));
+            return Err(self.reject(
+                codes::cfg::REJECTED,
+                CoreError::InvalidInput("请填写目标地址".to_owned()),
+            ));
         }
         if url.len() > MAX_URL_LEN {
-            return Err(self.reject(CoreError::InvalidInput(format!(
-                "目标地址过长：上限 {MAX_URL_LEN} 字节"
-            ))));
+            return Err(self.reject(
+                codes::cfg::URL_TOO_LONG,
+                CoreError::InvalidInput(format!("目标地址过长：上限 {MAX_URL_LEN} 字节")),
+            ));
         }
         if !(url.starts_with("http://") || url.starts_with("https://")) {
-            return Err(self.reject(CoreError::InvalidInput(
-                "目标地址需以 http:// 或 https:// 开头".to_owned(),
-            )));
+            return Err(self.reject(
+                codes::cfg::URL_SCHEME,
+                CoreError::InvalidInput("目标地址需以 http:// 或 https:// 开头".to_owned()),
+            ));
         }
         if !request.authorized {
-            return Err(self.reject(CoreError::NotAuthorized(
-                "请先确认：你拥有目标地址及其网络路径的明确测试授权".to_owned(),
-            )));
+            return Err(self.reject(
+                codes::cfg::NOT_AUTHORIZED,
+                CoreError::NotAuthorized(
+                    "请先确认：你拥有目标地址及其网络路径的明确测试授权".to_owned(),
+                ),
+            ));
         }
         if self.client.is_none() {
-            return Err(self.reject(CoreError::Internal(
-                "HTTP 客户端不可用，无法发起请求".to_owned(),
-            )));
+            return Err(self.reject(
+                codes::sys::CLIENT_UNAVAILABLE,
+                CoreError::Internal("HTTP 客户端不可用，无法发起请求".to_owned()),
+            ));
         }
         // 降级原因留到这里播报：此时前端一定在监听日志流（见字段注释）。
-        self.announce_client_degradation();
+        let degraded = self.announce_client_degradation();
 
         let threads = request.threads.clamp(1, MAX_WORKERS);
-        let rate_mib = self.checked(sanitize_rate_mib(request.rate_mib))?;
-        let limit_gb = self.checked(sanitize_limit(request.limit_gb, MAX_LIMIT_GB, "流量上限"))?;
-        let limit_minutes = self.checked(sanitize_limit(
-            request.limit_minutes,
-            MAX_LIMIT_MINUTES,
-            "时长上限",
-        ))?;
+        let rate_mib = self.checked(codes::cfg::NON_FINITE, sanitize_rate_mib(request.rate_mib))?;
+        let limit_gb = self.checked(
+            codes::cfg::NON_FINITE,
+            sanitize_limit(request.limit_gb, MAX_LIMIT_GB, "流量上限"),
+        )?;
+        let limit_minutes = self.checked(
+            codes::cfg::NON_FINITE,
+            sanitize_limit(request.limit_minutes, MAX_LIMIT_MINUTES, "时长上限"),
+        )?;
 
         // 将“是否已运行”的检查和状态切换放在同一把锁内。Tauri command 可以并发
         // 调用，原先在这里分两次取锁会让两个 start 都观察到 Idle，继而各自拉起一组
@@ -550,9 +636,10 @@ impl Engine {
             let mut inner = self.inner_lock();
             if inner.running {
                 drop(inner);
-                return Err(self.reject(CoreError::AlreadyRunning(
-                    "测试已在运行中，请先停止".to_owned(),
-                )));
+                return Err(self.reject(
+                    codes::run::ALREADY_RUNNING,
+                    CoreError::AlreadyRunning("测试已在运行中，请先停止".to_owned()),
+                ));
             }
 
             self.metrics.reset();
@@ -593,9 +680,12 @@ impl Engine {
             (request.rate_mib, rate_mib, "限速值"),
         ] {
             if applied != requested {
-                self.log(
+                self.log_full(
                     LogLevel::Warn,
-                    format!("{label}已按引擎允许范围收敛：请求 {requested:e} → 实际 {applied:.3}"),
+                    codes::cfg::CLAMPED,
+                    format!(
+                        "run={run} {label}已按引擎允许范围收敛：请求 {requested:e} → 实际 {applied:.3}"
+                    ),
                 );
             }
         }
@@ -607,41 +697,58 @@ impl Engine {
                 .spawn(async move { worker(index, engine, target, run).await });
         }
 
-        self.log(
+        // 生效参数快照：事后复现一次运行需要的第一手材料。用户报「打流有问题」时，
+        // 这一行就回答了「当时到底是几个并发、什么限速、有没有设上限」。
+        self.log_full(
             LogLevel::Info,
+            codes::run::CONFIG,
             format!(
-                "开始打流：{url} · 并发 {threads} · 限速 {}",
-                rate_summary(rate_mib)
+                "run={run} 生效参数 · 目标 {url} · 并发 {threads}/{MAX_WORKERS} · 限速 {} · 流量上限 {} · 时长上限 {} · HTTP 客户端 {}",
+                rate_summary(rate_mib),
+                limit_summary(limit_gb, "GB"),
+                limit_summary(limit_minutes, "分钟"),
+                if degraded { "已降级" } else { "正常" },
             ),
         );
-        self.emit_event(RunEventKind::Started, format!("已开始打流：{url}"));
+        self.emit_event(
+            RunEventKind::Started,
+            codes::run::STARTED,
+            format!("已开始打流：{url}（run={run}）"),
+        );
         Ok(())
     }
 
     /// 记录拒绝原因并同步广播，保证前端一定能看到失败原因。
-    fn reject(&self, error: CoreError) -> CoreError {
-        self.log(LogLevel::Error, error.to_string());
-        self.emit_event(RunEventKind::Rejected, error.to_string());
+    ///
+    /// `code` 由调用点给出（见 [`codes`]），并随事件一起广播：前端与落盘日志
+    /// 拿到的是同一个码，报障时只需报出它。
+    #[track_caller]
+    fn reject(&self, code: &str, error: CoreError) -> CoreError {
+        let message = error.to_string();
+        self.log_full(LogLevel::Error, code, message.clone());
+        self.emit_event(RunEventKind::Rejected, code, message);
         error
     }
 
     /// 校验失败的统一出口：先广播原因，再原样返回错误。
-    fn checked<T>(&self, result: Result<T, CoreError>) -> Result<T, CoreError> {
-        result.map_err(|error| self.reject(error))
+    #[track_caller]
+    fn checked<T>(&self, code: &str, result: Result<T, CoreError>) -> Result<T, CoreError> {
+        result.map_err(|error| self.reject(code, error))
     }
 
     /// 播报一次「HTTP 客户端已降级」，播过即清空。
     ///
     /// 幂等：第一次 `start()` 时前端必定已在监听，这条告警只该出现一次。
-    fn announce_client_degradation(&self) {
+    /// 返回本次会话的客户端是否处于降级配置（供生效参数快照引用）。
+    fn announce_client_degradation(&self) -> bool {
         let note = self
             .client_note
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
-        if let Some(note) = note {
-            self.log(LogLevel::Warn, note);
-        }
+        let Some(note) = note else { return false };
+        self.log_full(LogLevel::Warn, codes::sys::CLIENT_DEGRADED, note);
+        true
     }
 
     /// 停止打流（幂等）。
@@ -674,6 +781,15 @@ impl Engine {
             }
         }
 
+        // 自动停止（带代次围栏）与手动停止的事件类型/事件码不同，在此一次性判定，
+        // 避免调用方再补一次广播、产生两条语义重复的记录。
+        let (kind, code) = if target.is_some() {
+            (RunEventKind::AutoStopped, codes::run::AUTO_STOPPED)
+        } else {
+            (RunEventKind::Stopped, codes::run::STOPPED)
+        };
+        let run = self.control.run.load(Ordering::Acquire);
+
         // 同时作废当前代次：worker 不必依赖 `stop` 标志本身 —— 该标志会被
         // 紧随其后的 `start()` 清掉，只看它会让旧 worker 有机会「复活」。
         self.control.stop.store(true, Ordering::Release);
@@ -686,9 +802,35 @@ impl Engine {
         inner.started = None;
         inner.speed_bps = 0.0;
         inner.status = reason.to_owned();
+        let elapsed = inner.elapsed_frozen;
         drop(inner);
-        self.log(LogLevel::Warn, reason.to_owned());
-        self.emit_event(RunEventKind::Stopped, reason.to_owned());
+
+        // 停止时打一份「复现包」：时长、累计流量、成功/失败计数、错误分布。
+        // 只留一句「已停止」无法回答「是正常收工，还是守卫/并发出了问题」，
+        // 而这四个数字可以 —— 它们正是复现一次运行所需的最小上下文。
+        let total_bytes = self.metrics.bytes.load(Ordering::Relaxed);
+        let completed = self.metrics.completed.load(Ordering::Relaxed);
+        let failures = self.metrics.failures.load(Ordering::Relaxed);
+        let breakdown = self.metrics.error_snapshot();
+        let errors = if breakdown.is_empty() {
+            "无".to_owned()
+        } else {
+            breakdown
+                .iter()
+                .take(3)
+                .map(|item| format!("{}×{}", item.code, item.count))
+                .collect::<Vec<_>>()
+                .join("、")
+        };
+        self.log_full(
+            LogLevel::Warn,
+            code,
+            format!(
+                "run={run} 已停止 · 原因「{reason}」 · 时长 {elapsed:.1}s · 累计 {:.2} MiB · 成功 {completed} · 失败 {failures} · 错误分布 {errors}",
+                total_bytes as f64 / MIB
+            ),
+        );
+        self.emit_event(kind, code, format!("{reason}（run={run}）"));
         true
     }
 
@@ -700,7 +842,7 @@ impl Engine {
     pub fn set_live(&self, patch: LiveConfigPatch) -> Result<(), CoreError> {
         let requested_rate = patch.rate_mib;
         let rate_mib = match requested_rate {
-            Some(value) => Some(self.checked(sanitize_rate_mib(value))?),
+            Some(value) => Some(self.checked(codes::cfg::NON_FINITE, sanitize_rate_mib(value))?),
             None => None,
         };
 
@@ -709,11 +851,17 @@ impl Engine {
         // 在取锁之前播报，避免持锁做广播。
         if let (Some(requested), Some(applied)) = (requested_rate, rate_mib) {
             if requested != applied {
-                self.log(
+                self.log_full(
                     LogLevel::Warn,
+                    codes::cfg::CLAMPED,
                     format!("限速值已按引擎允许范围收敛：请求 {requested:e} → 实际 {applied:.3}"),
                 );
             }
+        }
+
+        let has_patch = patch.threads.is_some() || rate_mib.is_some();
+        if !has_patch {
+            return Ok(());
         }
 
         let mut inner = self.inner_lock();
@@ -729,6 +877,21 @@ impl Engine {
         if inner.running {
             inner.status = "测试运行中 · 并发与限速可实时调整".to_owned();
         }
+        let applied = (inner.threads, inner.rate_mib, inner.running);
+        drop(inner);
+
+        // 生效值同样要留痕：运行中改过一次并发/限速，事后复盘的第一步就是
+        // 确认「那一刻引擎实际用的是什么」，而不是用户以为自己填了什么。
+        self.log_full(
+            LogLevel::Info,
+            codes::cfg::LIVE_APPLIED,
+            format!(
+                "实时调整已生效 · 并发 {} · 限速 {} · 运行中 {}",
+                applied.0,
+                rate_summary(applied.1),
+                if applied.2 { "是" } else { "否" }
+            ),
+        );
         Ok(())
     }
 
@@ -830,9 +993,8 @@ impl Engine {
         if let Some((run, reason)) = auto_stop {
             // 代次围栏：算原因与执行停止之间用户可能已经停止并重新启动，
             // 过期代次的自动停止必须放弃，否则会误杀刚启动的新任务。
-            if self.stop_run(Some(run), &reason) {
-                self.emit_event(RunEventKind::AutoStopped, reason);
-            }
+            // 停止日志与事件的播报在 stop_run 内部完成（含 run 号与复现汇总）。
+            self.stop_run(Some(run), &reason);
         }
         let _ = self.metrics_tx.send(self.snapshot(false));
     }
@@ -843,6 +1005,15 @@ fn rate_summary(rate_mib: f64) -> String {
         format!("{rate_mib:.1} MiB/s")
     } else {
         "不限速".to_owned()
+    }
+}
+
+/// 自动停止上限摘要：`0` 在契约里表示「未设置」，日志里不应显示成 `0 GB`。
+fn limit_summary(value: f64, unit: &str) -> String {
+    if value > 0.0 {
+        format!("{value:.3} {unit}")
+    } else {
+        "未设置".to_owned()
     }
 }
 
@@ -938,6 +1109,19 @@ async fn backoff(engine: &Engine, run: u64, index: u32, failures: u32) {
     // 抖动落在 [capped/2, capped]，既错开重试时刻，又不让退避趋近于零。
     let total = Duration::from_millis(capped - jitter_ms(seed, capped / 2 + 1));
 
+    // 退避同样留痕（按里程碑节流）：它回答的是「失败之后引擎在做什么」。
+    // 缺了这段，日志就只剩一串「失败」，无法区分「快速重试」与「指数退避中」。
+    engine.note_failure(
+        LogLevel::Warn,
+        run,
+        index,
+        codes::net::BACKOFF,
+        &format!(
+            "连续失败 {failures} 次，退避 {}ms 后重试",
+            total.as_millis()
+        ),
+    );
+
     let mut slept = Duration::ZERO;
     while slept < total {
         // 每片都重新校验代次：旧代次的 worker 在下一片就能退出，
@@ -1003,6 +1187,16 @@ async fn worker(index: u32, engine: Arc<Engine>, url: String, run: u64) {
                         &format!("HTTP {}", status.as_u16()),
                         format!("服务器返回 HTTP {}", status.as_u16()),
                     );
+                    engine.note_failure(
+                        LogLevel::Error,
+                        run,
+                        index,
+                        codes::net::HTTP_STATUS,
+                        &format!(
+                            "服务器返回 HTTP {}（连续失败 {consecutive_failures} 次）",
+                            status.as_u16()
+                        ),
+                    );
                     engine.metrics.request_finished();
                     backoff(&engine, run, index, consecutive_failures).await;
                     continue;
@@ -1058,10 +1252,18 @@ async fn worker(index: u32, engine: Arc<Engine>, url: String, run: u64) {
                         }
                         Err(error) => {
                             healthy = false;
+                            let code = classify(&error);
                             engine.metrics.failures.fetch_add(1, Ordering::Relaxed);
                             engine
                                 .metrics
-                                .add_error(&classify(&error), format!("响应流中断：{error}"));
+                                .add_error(&code, format!("响应流中断：{error}"));
+                            engine.note_failure(
+                                LogLevel::Error,
+                                run,
+                                index,
+                                codes::net::STREAM_BROKEN,
+                                &format!("响应流中断（{code}）：{error}"),
+                            );
                             break;
                         }
                     }
@@ -1079,11 +1281,19 @@ async fn worker(index: u32, engine: Arc<Engine>, url: String, run: u64) {
             }
             Err(error) => {
                 consecutive_failures = consecutive_failures.saturating_add(1);
+                let code = classify(&error);
                 engine.metrics.request_finished();
                 engine.metrics.failures.fetch_add(1, Ordering::Relaxed);
                 engine
                     .metrics
-                    .add_error(&classify(&error), format!("请求失败：{error}"));
+                    .add_error(&code, format!("请求失败：{error}"));
+                engine.note_failure(
+                    LogLevel::Error,
+                    run,
+                    index,
+                    codes::net::REQUEST_FAILED,
+                    &format!("请求失败（{code}）：{error}"),
+                );
                 backoff(&engine, run, index, consecutive_failures).await;
             }
         }
@@ -1360,5 +1570,139 @@ mod tests {
         let current = engine.control.run.load(Ordering::Acquire);
         assert!(engine.stop_run(Some(current), "当前代次的自动停止"));
         assert!(!engine.is_running());
+    }
+
+    #[test]
+    fn repeated_failures_are_throttled_but_keep_the_first_site() {
+        let engine = Engine::spawn();
+        let mut logs = engine.subscribe_logs();
+
+        for _ in 0..105 {
+            engine.note_failure(
+                LogLevel::Error,
+                7,
+                3,
+                codes::net::REQUEST_FAILED,
+                "连接超时",
+            );
+        }
+
+        let mut kept = Vec::new();
+        while let Ok(entry) = logs.try_recv() {
+            kept.push(entry);
+        }
+        assert_eq!(kept.len(), 5, "105 次失败只该留下 1/2/3/10/100 五条");
+        assert!(kept
+            .iter()
+            .all(|entry| entry.code == codes::net::REQUEST_FAILED));
+        assert!(
+            kept[0].message.contains("run=7 worker#3"),
+            "首条必须带代次与 worker 号：{}",
+            kept[0].message
+        );
+        assert!(
+            kept.last().expect("至少一条").message.contains("第 100 次"),
+            "里程碑条目必须标明累计次数"
+        );
+    }
+
+    /// 一轮运行必须留下「生效参数快照」与「停止汇总」：前者回答「当时配置是什么」，
+    /// 后者回答「跑成了什么样」。二者缺一，事后就无法复现用户看到的现象。
+    #[test]
+    fn a_run_records_its_effective_config_and_a_stop_summary() {
+        let engine = Engine::spawn();
+        let mut logs = engine.subscribe_logs();
+
+        engine
+            .start(StartRunRequest {
+                url: "https://example.test/file".to_owned(),
+                threads: 8,
+                rate_mib: 10.0,
+                limit_gb: 1.0,
+                limit_minutes: 0.0,
+                authorized: true,
+            })
+            .expect("启动必须成功");
+        engine.stop("单测收尾");
+
+        let mut entries = Vec::new();
+        while let Ok(entry) = logs.try_recv() {
+            entries.push(entry);
+        }
+
+        let config = entries
+            .iter()
+            .find(|entry| entry.code == codes::run::CONFIG)
+            .expect("必须留下生效参数快照");
+        assert!(config.message.contains("并发 8/32"), "{}", config.message);
+        assert!(
+            config.message.contains("流量上限 1.000 GB"),
+            "{}",
+            config.message
+        );
+        assert!(
+            config.message.contains("时长上限 未设置"),
+            "{}",
+            config.message
+        );
+        assert!(
+            config.source.contains("engine.rs"),
+            "来源必须指向产生它的代码：{}",
+            config.source
+        );
+
+        let stopped = entries
+            .iter()
+            .find(|entry| entry.code == codes::run::STOPPED)
+            .expect("停止必须留下复现汇总");
+        assert!(
+            stopped.message.contains("原因「单测收尾」"),
+            "{}",
+            stopped.message
+        );
+        assert!(stopped.message.contains("· 失败 "), "{}", stopped.message);
+        assert!(
+            stopped.message.contains("· 错误分布 "),
+            "{}",
+            stopped.message
+        );
+    }
+
+    /// 被收敛过的安全边界必须在日志里留下「请求值 → 实际值」，并带上 run 号。
+    #[test]
+    fn clamped_limits_are_reported_with_the_run_id() {
+        let engine = Engine::spawn();
+        let mut logs = engine.subscribe_logs();
+
+        engine
+            .start(StartRunRequest {
+                url: "https://example.test/file".to_owned(),
+                threads: 4,
+                rate_mib: MAX_RATE_MIB * 1000.0,
+                limit_gb: 0.0,
+                limit_minutes: 0.0,
+                authorized: true,
+            })
+            .expect("超范围但语义合法的限速应当被收敛后启动");
+        engine.stop("单测收尾");
+
+        let mut clamps = Vec::new();
+        while let Ok(entry) = logs.try_recv() {
+            if entry.code == codes::cfg::CLAMPED {
+                clamps.push(entry);
+            }
+        }
+        assert_eq!(clamps.len(), 1, "只该为限速值产生一条收敛告警");
+        assert!(
+            clamps[0].message.contains("限速值"),
+            "{}",
+            clamps[0].message
+        );
+        assert!(clamps[0].message.contains("run="), "{}", clamps[0].message);
+        assert!(
+            clamps[0].message.contains("→ 实际"),
+            "{}",
+            clamps[0].message
+        );
     }
 }

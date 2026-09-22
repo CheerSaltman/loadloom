@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { LineChart } from "@/components/LineChart";
 import { useEngine } from "@/hooks/useEngine";
+import { commands, type LogLevel } from "@/bindings";
 import {
   cn,
   composeUrl,
@@ -35,9 +36,33 @@ function Pill({ children, tone }: { children: React.ReactNode; tone: string }) {
   );
 }
 
+/** 日志位置只显示 `文件名:行`：完整路径会把正文挤到屏幕外。 */
+function shortSource(source: string): string {
+  if (!source) return "-";
+  return source.split(/[\\/]/).pop() ?? source;
+}
+
+/**
+ * 前端异常上报的护栏：同一异常只报一次，整场上限 50 条。
+ *
+ * 没有护栏时，一个在渲染期持续抛出的异常会形成「异常 → 上报 → 写日志 → 推送日志
+ * → 重新渲染 → 再抛」的自激循环，把排障工具本身变成故障放大器。后端还有一层
+ * 里程碑节流，两层各自独立生效。
+ */
+const reportedErrors = new Set<string>();
+let reportedErrorCount = 0;
+const REPORT_LIMIT = 50;
+
+function shouldReportError(key: string): boolean {
+  if (reportedErrors.has(key) || reportedErrorCount >= REPORT_LIMIT) return false;
+  reportedErrors.add(key);
+  reportedErrorCount += 1;
+  return true;
+}
+
 export default function App() {
   const engine = useEngine();
-  const { snapshot, history, logs, connection, error } = engine;
+  const { snapshot, history, logs, connection, error, lastEvent, logPath } = engine;
 
   const [tab, setTab] = useState<"console" | "logs">("console");
   const [dark, setDark] = useState(true);
@@ -52,6 +77,10 @@ export default function App() {
   const [limitMinOn, setLimitMinOn] = useState(false);
   const [limitMin, setLimitMin] = useState(10);
   const [notice, setNotice] = useState<string | null>(null);
+  const [levelFilter, setLevelFilter] = useState<LogLevel | "all">("all");
+  const [logQuery, setLogQuery] = useState("");
+  const [autoScroll, setAutoScroll] = useState(true);
+  const logPaneRef = useRef<HTMLDivElement | null>(null);
 
   const running = snapshot?.phase === "running";
   const limitGbValid = Number.isFinite(limitGb) && limitGb > 0;
@@ -65,6 +94,157 @@ export default function App() {
     setThreads(snapshot.threads);
     setRateMib(snapshot.rateMib);
   }, [snapshot?.threads, snapshot?.rateMib]);
+
+  // 未捕获异常必须留痕：release 构建的 WebView 没有可见控制台，不主动上报就等于
+  // 「用户看到界面卡住 / 白屏，而日志里什么都没有」—— 正是最难定位的那类故障。
+  useEffect(() => {
+    const submit = (kind: string, message: string, source: string, stack: string) => {
+      if (!shouldReportError(`${kind}|${message}|${source}`)) return;
+      engine.reportError({ kind, message, source, stack });
+    };
+    const onError = (event: ErrorEvent) => {
+      submit(
+        "error",
+        event.message || "未知脚本错误",
+        `${event.filename || "webview"}:${event.lineno || 0}:${event.colno || 0}`,
+        event.error instanceof Error ? (event.error.stack ?? "") : "",
+      );
+    };
+    const onRejection = (event: PromiseRejectionEvent) => {
+      const reason: unknown = event.reason;
+      const message = (() => {
+        if (reason instanceof Error) return reason.message;
+        if (typeof reason === "string") return reason;
+        try {
+          return JSON.stringify(reason) ?? String(reason);
+        } catch {
+          return String(reason);
+        }
+      })();
+      submit(
+        "unhandledrejection",
+        message || "未知 Promise 拒绝",
+        "webview:promise",
+        reason instanceof Error ? (reason.stack ?? "") : "",
+      );
+    };
+    window.addEventListener("error", onError);
+    window.addEventListener("unhandledrejection", onRejection);
+    return () => {
+      window.removeEventListener("error", onError);
+      window.removeEventListener("unhandledrejection", onRejection);
+    };
+  }, [engine.reportError]);
+
+  const filteredLogs = useMemo(() => {
+    const needle = logQuery.trim().toLowerCase();
+    return logs.filter((entry) => {
+      if (levelFilter !== "all" && entry.level !== levelFilter) return false;
+      if (!needle) return true;
+      return `${entry.code} ${entry.source} ${entry.message}`.toLowerCase().includes(needle);
+    });
+  }, [logs, levelFilter, logQuery]);
+
+  // 自动滚动：默认跟随最新日志，用户手动回看历史时可以关掉。
+  useEffect(() => {
+    if (!autoScroll || tab !== "logs") return;
+    const pane = logPaneRef.current;
+    if (pane) pane.scrollTop = pane.scrollHeight;
+  }, [filteredLogs, autoScroll, tab]);
+
+  const notify = (message: string) => {
+    setNotice(message);
+    window.setTimeout(() => {
+      setNotice((current) => (current === message ? null : current));
+    }, 5000);
+  };
+
+  // 诊断文本 = 界面内存里的会话摘要 + 磁盘日志尾部（含环境头与崩溃报告清单）。
+  // 两者拼在一起，用户只要复制一次，维护者就能拿到「当时界面看到什么 + 落盘记录」。
+  const buildDiagnostics = async (): Promise<string> => {
+    const disk = await commands.getDiagnostics(500).catch(() => "（无法读取磁盘日志）");
+    const summary = [
+      "LoadLoom 会话摘要（界面内存快照）",
+      `推送链路：${connection}`,
+      `运行阶段：${snapshot?.phase ?? "未知"}`,
+      `目标地址：${snapshot?.url || "（无）"}`,
+      `并发 / 限速：${snapshot?.threads ?? 0} · ${snapshot?.rateMib ?? 0} MiB/s`,
+      `累计流量 / 失败请求：${snapshot?.totalBytes ?? 0} B · ${snapshot?.failures ?? 0}`,
+      `最近事件：${lastEvent ? `${lastEvent.code} ${lastEvent.message}` : "（无）"}`,
+      `日志文件：${logPath ?? "（未落盘）"}`,
+    ].join("\n");
+    return `${summary}\n\n${disk}`;
+  };
+
+  const copyText = async (text: string): Promise<boolean> => {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // 剪贴板 API 在某些环境不可用：退回旧式复制，失败才如实告知。
+      try {
+        const area = document.createElement("textarea");
+        area.value = text;
+        area.style.position = "fixed";
+        area.style.opacity = "0";
+        document.body.appendChild(area);
+        area.select();
+        const ok = document.execCommand("copy");
+        area.remove();
+        return ok;
+      } catch {
+        return false;
+      }
+    }
+  };
+
+  const copyDiagnostics = async () => {
+    const text = await buildDiagnostics();
+    notify((await copyText(text)) ? "诊断信息已复制到剪贴板" : "复制失败：请改用「导出诊断文件」");
+  };
+
+  const exportDiagnostics = async () => {
+    const text = await buildDiagnostics();
+    const picker = (
+      window as unknown as {
+        showSaveFilePicker?: (options: unknown) => Promise<{
+          createWritable: () => Promise<{
+            write: (data: string) => Promise<void>;
+            close: () => Promise<void>;
+          }>;
+        }>;
+      }
+    ).showSaveFilePicker;
+    if (!picker) {
+      notify(
+        (await copyText(text))
+          ? "当前环境不支持直接保存，诊断信息已复制到剪贴板"
+          : "导出失败：当前环境不支持保存文件",
+      );
+      return;
+    }
+    try {
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      const handle = await picker({
+        suggestedName: `loadloom-diagnostics-${stamp}.txt`,
+        types: [{ description: "诊断文本", accept: { "text/plain": [".txt"] } }],
+      });
+      const writable = await handle.createWritable();
+      await writable.write(text);
+      await writable.close();
+      notify("诊断文件已保存");
+    } catch {
+      notify("未保存（已取消或当前环境不支持）");
+    }
+  };
+
+  const openLogDir = async () => {
+    try {
+      await commands.openLogDir();
+    } catch (cause) {
+      notify(typeof cause === "string" ? cause : "无法打开日志目录");
+    }
+  };
 
   const toggleTheme = () => {
     const next = !dark;
@@ -360,25 +540,80 @@ export default function App() {
           </div>
         ) : (
           <section className="flex min-h-0 flex-1 flex-col p-5">
-            <div className="mb-3 flex items-center gap-3">
+            <div className="mb-3 flex flex-wrap items-center gap-2">
               <h2 className="text-[14px] font-bold">运行日志（Event 推流）</h2>
-              <button onClick={engine.clearLogs} className="ml-auto rounded-lg border border-line px-3 py-1.5 text-[12px] text-muted hover:text-ink">
-                清空
-              </button>
+              <div className="flex items-center gap-0.5 rounded-lg border border-line p-0.5">
+                {([
+                  ["all", "全部"],
+                  ["info", "信息"],
+                  ["warn", "警告"],
+                  ["error", "错误"],
+                ] as const).map(([key, label]) => (
+                  <button
+                    key={key}
+                    onClick={() => setLevelFilter(key)}
+                    className={cn(
+                      "rounded-md px-2.5 py-1 text-[12px] font-semibold transition",
+                      levelFilter === key ? "bg-accent/15 text-accent" : "text-muted hover:text-ink",
+                    )}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <input
+                value={logQuery}
+                onChange={(event) => setLogQuery(event.target.value)}
+                placeholder="搜索事件码 / 位置 / 关键词"
+                className="w-[220px] rounded-lg border border-line bg-surface-2 px-3 py-1.5 text-[12px] outline-none focus:border-accent"
+              />
+              <label className="flex items-center gap-1.5 text-[12px] text-muted">
+                <input
+                  type="checkbox"
+                  checked={autoScroll}
+                  onChange={(event) => setAutoScroll(event.target.checked)}
+                />
+                自动滚动
+              </label>
+              <div className="ml-auto flex flex-wrap items-center gap-2">
+                <button onClick={() => void copyDiagnostics()} className="rounded-lg border border-line px-3 py-1.5 text-[12px] text-muted hover:text-ink">
+                  复制诊断信息
+                </button>
+                <button onClick={() => void exportDiagnostics()} className="rounded-lg border border-line px-3 py-1.5 text-[12px] text-muted hover:text-ink">
+                  导出诊断文件
+                </button>
+                <button onClick={() => void openLogDir()} className="rounded-lg border border-line px-3 py-1.5 text-[12px] text-muted hover:text-ink">
+                  打开日志目录
+                </button>
+                <button onClick={engine.clearLogs} className="rounded-lg border border-line px-3 py-1.5 text-[12px] text-muted hover:text-ink">
+                  清空
+                </button>
+              </div>
             </div>
-            <div className="min-h-0 flex-1 overflow-y-auto rounded-2xl border border-line bg-surface p-3 font-mono text-[12px] leading-relaxed">
-              {logs.length ? (
-                logs.map((entry, index) => (
+            <div className="mb-2 break-all text-[11.5px] text-muted">
+              {logPath ? `日志文件：${logPath}` : "日志未落盘（仅本页可见）"}
+              {` · 显示 ${filteredLogs.length} / ${logs.length} 条`}
+            </div>
+            <div
+              ref={logPaneRef}
+              className="min-h-0 flex-1 overflow-y-auto rounded-2xl border border-line bg-surface p-3 font-mono text-[12px] leading-relaxed"
+            >
+              {filteredLogs.length ? (
+                filteredLogs.map((entry, index) => (
                   <div key={`${entry.atMs}-${index}`} className="flex gap-3">
                     <span className="shrink-0 text-muted">{formatClock(entry.atMs)}</span>
                     <span className={cn("shrink-0 uppercase", entry.level === "error" ? "text-bad" : entry.level === "warn" ? "text-warn" : "text-accent")}>
                       {entry.level}
                     </span>
+                    <span className="shrink-0 text-indigo">{entry.code || "-"}</span>
+                    <span className="shrink-0 text-muted/70" title={entry.source}>
+                      {shortSource(entry.source)}
+                    </span>
                     <span className="break-all">{entry.message}</span>
                   </div>
                 ))
               ) : (
-                <div className="text-muted">暂无日志</div>
+                <div className="text-muted">{logs.length ? "没有匹配的日志" : "暂无日志"}</div>
               )}
             </div>
           </section>

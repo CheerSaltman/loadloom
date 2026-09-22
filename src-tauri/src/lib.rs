@@ -102,6 +102,43 @@ fn get_log_path() -> Option<String> {
     logging::active_log_file().map(|path| path.display().to_string())
 }
 
+/// 生成诊断文本（环境头 + 落盘位置 + 崩溃报告清单 + 主日志末尾若干行）。
+///
+/// 前端「复制诊断信息 / 导出诊断」直接消费它：用户报障时只需要一份文本，
+/// 不必在日志目录里手动挑文件、拼现场。
+#[tauri::command]
+fn get_diagnostics(tail_lines: Option<u32>) -> String {
+    let tail = tail_lines
+        .map(|value| value.clamp(50, 5_000) as usize)
+        .unwrap_or(logging::DIAGNOSTICS_TAIL_LINES);
+    logging::diagnostics_text(tail)
+}
+
+/// 前端未捕获异常的上报载荷。
+///
+/// `kind` 形如 `error` / `unhandledrejection` / `manual`；`source` 是 `文件:行:列`；
+/// `stack` 是调用栈文本。全部字段按不可信输入处理（编码后再落盘）。
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FrontendErrorReport {
+    kind: String,
+    message: String,
+    source: String,
+    stack: String,
+}
+
+/// 记录前端（WebView）异常：写主日志（事件码 `SYS-002`）+ 生成 `crash-js-*.md`。
+#[tauri::command]
+fn report_frontend_error(report: FrontendErrorReport, state: State<'_, AppState>) {
+    logging::report_frontend_error(
+        &state.engine,
+        &report.kind,
+        &report.message,
+        &report.source,
+        &report.stack,
+    );
+}
+
 /// 在资源管理器中打开**实际生效**的日志目录。
 #[tauri::command]
 fn open_log_dir() -> Result<String, String> {
@@ -137,7 +174,9 @@ pub fn run() {
             let mut logs = engine.subscribe_logs();
             tauri::async_runtime::spawn(async move {
                 while let Ok(entry) = logs.recv().await {
-                    logging::write(entry.level, &entry.message);
+                    // 事件码与来源一并落盘：磁盘日志与界面条目保持同一条记录，
+                    // 否则「界面看到的码」在文件里搜不到，排障时又要来回对照。
+                    logging::write_full(entry.level, &entry.code, &entry.source, &entry.message);
                     // 上屏的那一份同样走编码：两条出口共用同一次编码，否则事件流
                     // 就是绕过日志编码的后门（见 logging::encoded_entry）。
                     let _ = log_handle.emit(EVENT_LOG, logging::encoded_entry(entry));
@@ -196,6 +235,8 @@ pub fn run() {
             set_live_config,
             subscribe_metrics,
             get_log_path,
+            get_diagnostics,
+            report_frontend_error,
             open_log_dir,
             quit_app
         ])

@@ -78,6 +78,10 @@ export type LogLevel = "info" | "warn" | "error";
 /** Event `loadloom://log` 载荷。 */
 export interface LogEntry {
   level: LogLevel;
+  /** 稳定事件码（`NET-002` 这类，见 Rust 侧 `codes.rs`）；空串表示无码。 */
+  code: string;
+  /** 产生这条日志的代码位置（`文件:行`），由后端自动填充。 */
+  source: string;
   message: string;
   atMs: number;
 }
@@ -87,6 +91,10 @@ export type RunEventKind = "started" | "stopped" | "autoStopped" | "rejected";
 /** Event `loadloom://run-event` 载荷。 */
 export interface RunEvent {
   kind: RunEventKind;
+  /** 稳定事件码；拒绝事件沿用被拒原因对应的码。 */
+  code: string;
+  /** 产生这个事件的代码位置（`文件:行`）。 */
+  source: string;
   message: string;
   atMs: number;
 }
@@ -97,6 +105,19 @@ export type CoreError =
   | { notAuthorized: string }
   | { alreadyRunning: string }
   | { internal: string };
+
+/**
+ * 前端异常上报载荷（Command `report_frontend_error` 入参）。
+ *
+ * `kind` 取 `error` / `unhandledrejection` / `manual`；`source` 是 `文件:行:列`；
+ * `stack` 是调用栈文本。后端会编码后落盘，并生成 `crash-js-*.md` 崩溃报告。
+ */
+export interface FrontendErrorReport {
+  kind: string;
+  message: string;
+  source: string;
+  stack: string;
+}
 
 /** 把 `CoreError` 还原为人类可读文案 + 判别标签。 */
 export function describeCoreError(error: unknown): string {
@@ -127,6 +148,16 @@ export const commands = {
   stopRun: (reason?: string) => invoke<void>("stop_run", { reason: reason ?? null }),
   setLiveConfig: (patch: LiveConfigPatch) =>
     invoke<void>("set_live_config", { patch }),
+  /** 实际生效的日志文件路径；完全无法落盘时为 null。 */
+  getLogPath: () => invoke<string | null>("get_log_path"),
+  /** 在资源管理器中打开实际生效的日志目录。 */
+  openLogDir: () => invoke<string>("open_log_dir"),
+  /** 生成诊断文本（环境头 + 崩溃报告清单 + 主日志末尾若干行）。 */
+  getDiagnostics: (tailLines?: number) =>
+    invoke<string>("get_diagnostics", { tailLines: tailLines ?? null }),
+  /** 上报前端未捕获异常（后端落盘 + 生成崩溃报告）。 */
+  reportFrontendError: (report: FrontendErrorReport) =>
+    invoke<void>("report_frontend_error", { report }),
   quitApp: () => invoke<void>("quit_app"),
 
   /**

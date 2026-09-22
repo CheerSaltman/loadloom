@@ -27,6 +27,7 @@
 //! * **两条出口同一份编码**：落盘与上屏共用 `encoded_entry`，否则未编码的那条通道
 //!   就是绕过上一条约束的后门。
 
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -35,7 +36,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tauri::AppHandle;
 
-use loadloom_core::{Engine, LogEntry, LogLevel};
+use loadloom_core::{codes, Engine, LogEntry, LogLevel};
 
 /// 单文件上限，超过则轮转为 `loadloom.prev.log`。
 const MAX_LOG_BYTES: u64 = 4 * 1024 * 1024;
@@ -43,6 +44,14 @@ const MAX_LOG_BYTES: u64 = 4 * 1024 * 1024;
 const LOG_FILE_NAME: &str = "loadloom.log";
 /// 轮转后保留的上一代文件名（只留一代，避免日志把磁盘吃满）。
 const PREV_LOG_FILE_NAME: &str = "loadloom.prev.log";
+/// 诊断导出最多附带的主日志字节数（避免把 4 MiB 全塞进剪贴板 / 对话框）。
+const DIAGNOSTICS_MAX_BYTES: u64 = 512 * 1024;
+/// 诊断导出默认附带的主日志行数。
+pub(crate) const DIAGNOSTICS_TAIL_LINES: usize = 500;
+/// 崩溃报告里附带的主日志行数。
+const CRASH_LOG_TAIL_LINES: usize = 200;
+/// 主日志里逐行写入的回溯上限（全文始终进崩溃报告文件）。
+const BACKTRACE_LOG_LINES: usize = 40;
 
 /// 落盘句柄。外层 `None` 表示「还没初始化」，内层 `None` 表示「日志无法落盘，只上屏」——
 /// 后者是允许的降级状态，不是错误。
@@ -100,8 +109,39 @@ fn level_label(level: LogLevel) -> &'static str {
 }
 
 /// 组装一整行（含结尾换行）。落盘与上屏共用同一份文本，避免两处格式各自漂移。
-fn format_line(at: SystemTime, level: LogLevel, message: &str) -> String {
-    format!("{} [{}] {}\n", timestamp(at), level_label(level), message)
+///
+/// 固定五列：`时间 [级别] [位置] (事件码) 正文`，例如
+/// `2026-09-22 10:00:00.000Z [ERROR] [engine.rs:1035] (NET-002) 请求失败（TIMEOUT）：…`
+///
+/// 任何一段缺失都保留占位（`-`），列位置不随内容跳动 —— 用户可以直接复制一整行
+/// 贴进报告，维护者一眼就能读出「什么时候、哪一级、哪一行代码、哪个错误码」。
+fn format_line(at: SystemTime, level: LogLevel, code: &str, source: &str, message: &str) -> String {
+    let code = if code.is_empty() { "-" } else { code };
+    let source = if source.is_empty() {
+        "-".to_owned()
+    } else {
+        short_source(source)
+    };
+    format!(
+        "{} [{}] [{}] ({}) {}\n",
+        timestamp(at),
+        level_label(level),
+        source,
+        code,
+        message
+    )
+}
+
+/// 位置只保留 `文件名:行`。
+///
+/// 完整路径（`crates/loadloom-core/src/engine.rs`）会把正文挤到屏幕外，而同一仓库里
+/// 文件名足以定位；完整路径仍保留在事件流条目的 `source` 字段里，供界面与诊断导出使用。
+fn short_source(source: &str) -> String {
+    source
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(source)
+        .to_owned()
 }
 
 /// 单条日志正文的字符上限。超出部分截断 —— 消息可能来自远端响应或错误文本，
@@ -130,6 +170,35 @@ fn sanitize(message: &str) -> String {
     }
     if message.chars().count() > MAX_MESSAGE_CHARS {
         out.push('…');
+    }
+    out
+}
+
+/// 崩溃报告正文的字符上限（比单行日志宽，因为要容纳调用栈）。
+const MAX_REPORT_CHARS: usize = 16_000;
+
+/// 多行文本的编码：与 [`sanitize`] 同一套字符规则，但**保留换行结构**。
+///
+/// 只用于崩溃报告这类富文本载体：调用栈的价值就在分层结构上，压成一行等于
+/// 丢掉可读性；同时依然编码控制字符与格式字符，避免外部文本在报告里伪造结构。
+fn sanitize_multiline(text: &str) -> String {
+    // 先把 CRLF 归一成 LF，否则 `\r`→`\n` 与 `\n` 两步会把它变成两个换行。
+    let normalized = text.replace("\r\n", "\n");
+    let mut out = String::with_capacity(normalized.len().min(MAX_REPORT_CHARS));
+    for character in normalized.chars().take(MAX_REPORT_CHARS) {
+        match character {
+            '\n' => out.push('\n'),
+            // 单独出现的 CR（老式 Mac 风格换行）也视为换行。
+            '\r' => out.push('\n'),
+            '\t' => out.push_str("    "),
+            _ if character.is_control() || is_format(character) => {
+                out.push_str(&format!("\\u{{{:04X}}}", character as u32));
+            }
+            _ => out.push(character),
+        }
+    }
+    if normalized.chars().count() > MAX_REPORT_CHARS {
+        out.push_str("\n…（已截断）");
     }
     out
 }
@@ -166,6 +235,8 @@ fn is_format(character: char) -> bool {
 /// 「两条出口一致」正是本模块的前提。
 pub(crate) fn encoded_entry(entry: LogEntry) -> LogEntry {
     LogEntry {
+        code: sanitize(&entry.code),
+        source: sanitize(&entry.source),
         message: sanitize(&entry.message),
         ..entry
     }
@@ -349,10 +420,16 @@ fn note(message: &str) {
 ///
 /// 永不 panic：日志设施自身失败（磁盘满、权限不足、互斥锁中毒）绝不能
 /// 反过来拖垮应用 —— 那正是它在故障时最该派上用场的时刻。
-pub(crate) fn write(level: LogLevel, message: &str) {
+pub(crate) fn write_full(level: LogLevel, code: &str, source: &str, message: &str) {
     // 唯一写文件 / 上屏的出口，因此编码也放在这里：任何调用方都不可能绕过
     // （包括 panic hook 里那段可能夹杂远端文本的消息）。
-    let line = format_line(SystemTime::now(), level, &sanitize(message));
+    let line = format_line(
+        SystemTime::now(),
+        level,
+        &sanitize(code),
+        &sanitize(source),
+        &sanitize(message),
+    );
 
     if let Some(mut sink) = sink() {
         sink.write_line(&line);
@@ -362,35 +439,72 @@ pub(crate) fn write(level: LogLevel, message: &str) {
     eprint!("{line}");
 }
 
+/// 环境头 —— 每份日志 / 崩溃报告的第一段。
+///
+/// 排障最怕「报告里没有版本」：同一个现象在不同版本、不同平台上的原因可能完全不同。
+/// 把版本、构建档、平台、进程号一次性写进去，事后不必再向用户追问这些基本信息。
+pub(crate) fn env_header() -> String {
+    format!(
+        "LoadLoom {}（{}，构建 {}）· 平台 {}/{} · PID {} · 时间戳 UTC",
+        env!("CARGO_PKG_VERSION"),
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        },
+        env!("LOADLOOM_BUILD_ID"),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        std::process::id()
+    )
+}
+
 /// 初始化落盘句柄并安装 panic hook。
 pub(crate) fn init(app: AppHandle, engine: &Arc<Engine>) {
     let _ = SINK.set(open_sink().map(Mutex::new));
 
-    write(LogLevel::Info, "================ 会话开始 ================");
+    write_full(
+        LogLevel::Info,
+        codes::sys::SESSION_START,
+        "shell:logging.rs",
+        "================ 会话开始 ================",
+    );
     let location = active_log_file()
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| "（未落盘）".to_owned());
-    write(
+    // 环境头 + 落盘位置一次写清：用户报障时最常见的两个追问（「你用的哪个版本」
+    // 与「日志在哪」）在这一行里都有答案。
+    write_full(
         LogLevel::Info,
+        codes::sys::SESSION_START,
+        "shell:logging.rs",
         &format!(
-            "日志文件 {location} · 进程 PID {} · 时间戳为 UTC",
-            std::process::id()
+            "{header} · 日志文件 {location} · 单文件上限 4 MiB（超过后归档为 {PREV_LOG_FILE_NAME}）",
+            header = env_header()
         ),
     );
     install_panic_hook(app, Arc::clone(engine));
 }
 
 /// 安装 panic hook：先落盘 + 上屏，再交回默认 hook（保留 stderr 输出）。
+///
+/// 崩溃路径必须留下**三样**东西，缺一不可：
+/// 1. 主日志里的错误行（事件码 `SYS-001` + `文件:行:列`）；
+/// 2. 逐行写入的回溯（日志本身就能看到调用栈，不必额外工具）；
+/// 3. 独立的 `crash-*.md` 崩溃报告（环境 + 完整回溯 + 最近日志）——
+///    用户只需把这一个文件发出来，不必再人工描述现场。
 fn install_panic_hook(app: AppHandle, engine: Arc<Engine>) {
     let default_hook = std::panic::take_hook();
 
     std::panic::set_hook(Box::new(move |info| {
         let payload = info.payload();
-        let message = payload
-            .downcast_ref::<&str>()
-            .map(|text| (*text).to_owned())
-            .or_else(|| payload.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "未知 panic 载荷".to_owned());
+        let message = sanitize(
+            &payload
+                .downcast_ref::<&str>()
+                .map(|text| (*text).to_owned())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "未知 panic 载荷".to_owned()),
+        );
 
         let location = info
             .location()
@@ -402,24 +516,251 @@ fn install_panic_hook(app: AppHandle, engine: Arc<Engine>) {
             .unwrap_or("unnamed")
             .to_owned();
 
-        write(
+        write_full(
             LogLevel::Error,
-            &format!("PANIC [{thread}] {message} @ {location}"),
-        );
-        write(
-            LogLevel::Error,
-            &format!("回溯：{}", std::backtrace::Backtrace::force_capture()),
+            codes::sys::PANIC,
+            &location,
+            &format!("PANIC [{thread}] {message}"),
         );
 
-        // 上屏：走引擎既有的日志流，前端「运行日志」页立刻可见。
+        let backtrace = std::backtrace::Backtrace::force_capture().to_string();
+        write_backtrace(&backtrace);
+
+        let tail = active_log_file()
+            .as_deref()
+            .map(|path| read_tail(path, DIAGNOSTICS_MAX_BYTES, CRASH_LOG_TAIL_LINES))
+            .unwrap_or_default();
+        let report = format!(
+            "# LoadLoom 崩溃报告\n\n\
+             - {header}\n\
+             - 类型：Rust panic\n\
+             - 线程：{thread}\n\
+             - 位置：{location}\n\
+             - 事件码：{code}\n\n\
+             ## 错误详情\n\n{message}\n\n\
+             ## 回溯\n\n~~~\n{backtrace}\n~~~\n\n\
+             ## 最近日志（最后 {CRASH_LOG_TAIL_LINES} 行）\n\n~~~\n{tail}\n~~~\n",
+            header = env_header(),
+            code = codes::sys::PANIC,
+        );
+        let crash_path = write_crash_report("panic", &report)
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "（写入失败，见上方日志）".to_owned());
+
+        // 上屏：走引擎既有的日志流，前端「运行日志」页立刻可见，并带上报告路径。
         engine.log_external(
             LogLevel::Error,
-            format!("程序内部错误：{message}（{location}）"),
+            format!("程序内部错误：{message}（{location}）· 崩溃报告 {crash_path}"),
         );
 
         let _ = &app;
         default_hook(info);
     }));
+}
+
+/// 把回溯逐行写入主日志（只写前 [`BACKTRACE_LOG_LINES`] 行）。
+///
+/// 不把整段回溯塞进一条日志：`sanitize` 会把换行编码成 `\n` 字面量，几百行的
+/// 调用栈会变成一行无法阅读的巨串。逐行写既保留结构，又受行数上限约束；
+/// 完整回溯始终在崩溃报告文件里。
+fn write_backtrace(text: &str) {
+    let total = text.lines().count();
+    for (index, line) in text.lines().take(BACKTRACE_LOG_LINES).enumerate() {
+        write_full(
+            LogLevel::Error,
+            codes::sys::PANIC,
+            "shell:backtrace",
+            &format!("回溯[{:02}] {line}", index + 1),
+        );
+    }
+    if total > BACKTRACE_LOG_LINES {
+        write_full(
+            LogLevel::Error,
+            codes::sys::PANIC,
+            "shell:backtrace",
+            &format!("回溯共 {total} 行，其余见崩溃报告文件"),
+        );
+    }
+}
+
+/// 崩溃报告文件名：`crash-<类型>-<UTC 时间戳>-<PID>.md`。
+///
+/// 带时间戳与 PID 是为了多次闪退互不覆盖 —— 排障时经常要对比「这次和上次是不是
+/// 同一个原因」，覆盖掉就等于把上一次的现场销毁了。
+fn crash_file_name(kind: &str, at: SystemTime) -> String {
+    let stamp = timestamp(at)
+        .trim_end_matches('Z')
+        .replace([' ', ':', '.'], "-");
+    format!("crash-{kind}-{stamp}-{}.md", std::process::id())
+}
+
+/// 报告正文的加固：把可能存在的 Markdown 围栏降级。
+///
+/// 正文里嵌着 panic 消息、异常堆栈等外部文本，自带 ``` 时会顶破报告结构，
+/// 让后续内容被误当成代码块。
+fn harden_report(body: &str) -> String {
+    body.replace("```", "'''").replace("~~~", "~ ~ ~")
+}
+
+/// 写崩溃报告；返回实际路径。任何失败都只返回 `None` —— 崩溃路径上绝不二次 panic。
+fn write_crash_report(kind: &str, body: &str) -> Option<PathBuf> {
+    let dir = active_log_dir();
+    fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(crash_file_name(kind, SystemTime::now()));
+    fs::write(&path, harden_report(body)).ok()?;
+    Some(path)
+}
+
+/// 读取文件末尾若干行（最多 `max_bytes` 字节）。
+///
+/// 用 `from_utf8_lossy`：截断点可能落在多字节字符中间，宁可首行出现一个替换符，
+/// 也不能因为边界问题丢掉整段日志。
+fn read_tail(path: &Path, max_bytes: u64, max_lines: usize) -> String {
+    let Ok(data) = fs::read(path) else {
+        return String::new();
+    };
+    let start = data.len().saturating_sub(max_bytes as usize);
+    let text = String::from_utf8_lossy(&data[start..]).into_owned();
+    let lines: Vec<&str> = text.lines().collect();
+    let from = lines.len().saturating_sub(max_lines);
+    lines[from..].join("\n")
+}
+
+/// 列出日志目录里已有的崩溃报告（最新在前）。
+fn list_crash_reports() -> Vec<String> {
+    let Ok(entries) = fs::read_dir(active_log_dir()) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.starts_with("crash-") && name.ends_with(".md"))
+        .collect();
+    names.sort();
+    names.reverse();
+    names
+}
+
+/// 生成可直接粘贴给维护者的诊断文本。
+///
+/// 内容 = 环境头 + 落盘位置 + 崩溃报告清单 + 主日志末尾若干行。前端的
+/// 「复制诊断信息 / 导出诊断」按钮走这里，避免用户手动翻目录、挑文件。
+pub(crate) fn diagnostics_text(tail_lines: usize) -> String {
+    let file = active_log_file();
+    let tail = file
+        .as_deref()
+        .map(|path| read_tail(path, DIAGNOSTICS_MAX_BYTES, tail_lines))
+        .unwrap_or_default();
+    let crashes = list_crash_reports();
+    format!(
+        "LoadLoom 诊断信息\n\
+         生成时间（UTC）：{}\n\
+         {}\n\
+         日志文件：{}\n\
+         日志目录：{}\n\
+         崩溃报告：{}\n\
+         --- 最近日志（最后 {} 行）---\n\
+         {}\n",
+        timestamp(SystemTime::now()),
+        env_header(),
+        file.map(|path| path.display().to_string())
+            .unwrap_or_else(|| "（未落盘）".to_owned()),
+        active_log_dir().display(),
+        if crashes.is_empty() {
+            "无".to_owned()
+        } else {
+            crashes.join("、")
+        },
+        tail_lines,
+        tail,
+    )
+}
+
+/// 记录前端（WebView）未捕获异常。
+///
+/// 与 Rust panic 同等对待：写主日志 + 生成 `crash-js-*.md`。WebView 的异常默认只
+/// 存在于开发者控制台（release 构建下用户根本看不到），不落盘就等于没有发生。
+/// 按「类型 + 文案 + 位置」去重并复用里程碑节流：渲染循环里每秒抛一次的异常
+/// 不该把日志刷爆。
+pub(crate) fn report_frontend_error(
+    engine: &Arc<Engine>,
+    kind: &str,
+    message: &str,
+    source: &str,
+    stack: &str,
+) {
+    let kind = sanitize(kind.trim());
+    let message = sanitize(message.trim());
+    let source = sanitize(source.trim());
+    let stack = sanitize_multiline(stack.trim());
+
+    static SEEN: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    let count = {
+        let seen = SEEN.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut seen = seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if seen.len() > 256 {
+            seen.clear();
+        }
+        let slot = seen
+            .entry(format!("{kind}|{message}|{source}"))
+            .or_insert(0);
+        *slot += 1;
+        *slot
+    };
+    if !codes::is_log_milestone(count) {
+        return;
+    }
+
+    let location = if source.is_empty() {
+        "webview:未知位置".to_owned()
+    } else {
+        format!("webview:{source}")
+    };
+    let repeat = if count > codes::LOG_BURST {
+        format!("（同一异常第 {count} 次，日志按里程碑节流）")
+    } else {
+        String::new()
+    };
+    write_full(
+        LogLevel::Error,
+        codes::sys::FRONTEND_ERROR,
+        &location,
+        &format!("{kind} {message}{repeat}"),
+    );
+    for (index, line) in stack.lines().take(BACKTRACE_LOG_LINES).enumerate() {
+        write_full(
+            LogLevel::Error,
+            codes::sys::FRONTEND_ERROR,
+            &location,
+            &format!("前端堆栈[{:02}] {line}", index + 1),
+        );
+    }
+
+    let tail = active_log_file()
+        .as_deref()
+        .map(|path| read_tail(path, DIAGNOSTICS_MAX_BYTES, CRASH_LOG_TAIL_LINES))
+        .unwrap_or_default();
+    let report = format!(
+        "# LoadLoom 崩溃报告\n\n\
+         - {header}\n\
+         - 类型：前端异常（{kind}）\n\
+         - 位置：{location}\n\
+         - 事件码：{code}\n\n\
+         ## 错误详情\n\n{message}\n\n\
+         ## 调用栈\n\n~~~\n{stack}\n~~~\n\n\
+         ## 最近日志（最后 {CRASH_LOG_TAIL_LINES} 行）\n\n~~~\n{tail}\n~~~\n",
+        header = env_header(),
+        code = codes::sys::FRONTEND_ERROR,
+    );
+    let crash_path = write_crash_report("js", &report)
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "（写入失败，见上方日志）".to_owned());
+
+    // 上屏：走引擎既有的日志流，前端「运行日志」页立刻可见。
+    engine.log_external(
+        LogLevel::Error,
+        format!("前端异常：{kind} {message}（{location}）· 崩溃报告 {crash_path}"),
+    );
 }
 
 #[cfg(test)]
@@ -477,7 +818,7 @@ mod tests {
         assert!(!sanitized.contains('\n'));
 
         // 每条日志行（含时间戳与级别）仍然只占一行。
-        let line = format_line(at(0, 0), LogLevel::Error, &sanitize("boom\nboom"));
+        let line = format_line(at(0, 0), LogLevel::Error, "", "", &sanitize("boom\nboom"));
         assert_eq!(line.matches('\n').count(), 1);
         assert!(line.ends_with("boom\\nboom\n"));
     }
@@ -496,13 +837,34 @@ mod tests {
     #[test]
     fn formatted_line_layout_is_stable() {
         assert_eq!(
-            format_line(at(0, 0), LogLevel::Error, "boom"),
-            "1970-01-01 00:00:00.000Z [ERROR] boom\n"
+            format_line(at(0, 0), LogLevel::Error, "", "", "boom"),
+            "1970-01-01 00:00:00.000Z [ERROR] [-] (-) boom\n"
         );
         assert_eq!(
-            format_line(at(0, 0), LogLevel::Info, "ok"),
-            "1970-01-01 00:00:00.000Z [INFO ] ok\n"
+            format_line(
+                at(0, 0),
+                LogLevel::Error,
+                "NET-002",
+                "crates/loadloom-core/src/engine.rs:1035",
+                "请求失败"
+            ),
+            "1970-01-01 00:00:00.000Z [ERROR] [engine.rs:1035] (NET-002) 请求失败\n"
         );
+        // 五列位置固定：一条日志行可以直接复制给维护者。
+        assert_eq!(
+            format_line(at(0, 0), LogLevel::Info, "RUN-005", "engine.rs:1", "参数"),
+            "1970-01-01 00:00:00.000Z [INFO ] [engine.rs:1] (RUN-005) 参数\n"
+        );
+    }
+
+    #[test]
+    fn short_source_strips_directories_on_both_separators() {
+        assert_eq!(
+            short_source("crates/loadloom-core/src/engine.rs:1035"),
+            "engine.rs:1035"
+        );
+        assert_eq!(short_source("src-tauri\\src\\logging.rs:1"), "logging.rs:1");
+        assert_eq!(short_source("engine.rs:1"), "engine.rs:1");
     }
 
     #[test]
@@ -610,16 +972,88 @@ mod tests {
         // 上屏与落盘必须同源：少编码一条通道，等于给攻击者留一条后门。
         let entry = LogEntry {
             level: LogLevel::Error,
+            code: "NET-002\u{2028}伪造".to_owned(),
+            source: "engine.rs:1\n[ERROR] 伪造".to_owned(),
             message: "boom\u{2028}2026-01-01 00:00:00.000Z [ERROR] 伪造的崩溃".to_owned(),
             at_ms: 7,
         };
         let encoded = encoded_entry(entry);
         assert_eq!(encoded.at_ms, 7);
         assert_eq!(encoded.level, LogLevel::Error);
+        // 事件码与来源同样跨进程边界（磁盘 -> 界面），必须一起编码。
+        assert_eq!(encoded.code, "NET-002\\u{2028}伪造");
+        assert_eq!(encoded.source, "engine.rs:1\\n[ERROR] 伪造");
         assert_eq!(
             encoded.message,
             "boom\\u{2028}2026-01-01 00:00:00.000Z [ERROR] 伪造的崩溃"
         );
         assert!(!encoded.message.contains('\u{2028}'));
+    }
+
+    #[test]
+    fn multiline_sanitizer_keeps_structure_but_encodes_hostile_characters() {
+        // 调用栈的价值在分层：换行必须保留，控制字符仍要编码。
+        assert_eq!(sanitize_multiline("a\nb\r\nc"), "a\nb\nc");
+        assert_eq!(sanitize_multiline("tab\there"), "tab    here");
+        assert_eq!(
+            sanitize_multiline("bad\u{202E}override\u{7}"),
+            "bad\\u{202E}override\\u{0007}"
+        );
+        // 超长文本截断，避免一份报告被单条异常撑爆。
+        let huge = "x".repeat(MAX_REPORT_CHARS + 10);
+        let clipped = sanitize_multiline(&huge);
+        assert!(clipped.ends_with("…（已截断）"));
+        assert!(clipped.chars().count() <= MAX_REPORT_CHARS + 8);
+    }
+
+    #[test]
+    fn environment_header_names_version_platform_and_pid() {
+        let header = env_header();
+        assert!(header.contains(env!("CARGO_PKG_VERSION")), "{header}");
+        assert!(header.contains(std::env::consts::OS), "{header}");
+        assert!(header.contains(std::env::consts::ARCH), "{header}");
+        assert!(header.contains(&std::process::id().to_string()), "{header}");
+        // 版本号不变的热更新下，构建号是区分两次发布的唯一标识。
+        assert!(header.contains(env!("LOADLOOM_BUILD_ID")), "{header}");
+    }
+
+    #[test]
+    fn crash_file_names_are_timestamped_and_do_not_collide() {
+        let first = crash_file_name("panic", at(0, 0));
+        assert_eq!(
+            first,
+            format!(
+                "crash-panic-1970-01-01-00-00-00-000-{}.md",
+                std::process::id()
+            )
+        );
+        // 同一毫秒也只会因为 PID 相同而重名；不同时间必然不同名。
+        assert_ne!(first, crash_file_name("panic", at(1, 0)));
+        assert_ne!(first, crash_file_name("js", at(0, 0)));
+    }
+
+    #[test]
+    fn read_tail_keeps_the_last_lines_and_survives_a_missing_file() {
+        let dir = temp_dir("tail");
+        let path = dir.join(LOG_FILE_NAME);
+        let body: String = (0..50).map(|index| format!("line-{index:02}\n")).collect();
+        fs::write(&path, body).expect("写入测试日志");
+
+        let tail = read_tail(&path, u64::MAX, 3);
+        assert_eq!(tail, "line-47\nline-48\nline-49");
+        // 不存在的文件返回空串（崩溃路径上不允许再失败）。
+        assert!(read_tail(&dir.join("missing.log"), u64::MAX, 3).is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn diagnostics_report_environment_paths_and_a_log_tail() {
+        let text = diagnostics_text(50);
+        assert!(text.starts_with("LoadLoom 诊断信息"), "{text}");
+        assert!(text.contains(env!("CARGO_PKG_VERSION")), "{text}");
+        assert!(text.contains("日志目录："), "{text}");
+        assert!(text.contains("崩溃报告："), "{text}");
+        assert!(text.contains("--- 最近日志（最后 50 行）---"), "{text}");
     }
 }

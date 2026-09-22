@@ -9,6 +9,7 @@
 //!
 //! 上层（桌面壳）只负责三件事：调用 [`Engine`] 的方法、订阅广播通道、把结果推给前端。
 
+pub mod codes;
 pub mod contract;
 pub mod engine;
 mod metrics;
