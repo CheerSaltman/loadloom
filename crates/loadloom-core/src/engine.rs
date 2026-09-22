@@ -21,7 +21,7 @@
 //!
 //! * 明确的非法值（`NaN`、非有限数）→ 拒绝，并通过日志与 `run_event` 广播原因；
 //! * 超出安全范围但语义合法的值 → 收敛到范围内，且**如实告知**被收敛过
-//!   （绝不静默修改用户设定的并发、限速与安全停止边界）；
+//!   （绝不静默修改用户设定的限速与安全停止边界；并发数按 `1..=MAX_WORKERS` 收敛）；
 //! * 任何情况下都不 panic：畸形载荷最多让本次请求失败，不允许掀翻进程。
 //!
 //! 运行期另有两条硬约束：worker 只认同一个**运行代次**（见 [`Control`]），
@@ -54,6 +54,8 @@ pub const TICK: Duration = Duration::from_millis(250);
 const GIB: f64 = 1_073_741_824.0;
 const MIB: f64 = 1_048_576.0;
 const DEFAULT_THREADS: u32 = 4;
+/// 目标地址长度上限（字节）：URL 进入每一帧快照并随日志广播，必须在边界截断。
+const MAX_URL_LEN: usize = 2048;
 
 /// 自动停止「流量上限」的硬上限（GB，1 PiB）。
 ///
@@ -502,6 +504,11 @@ impl Engine {
         let url = request.url.trim().to_owned();
         if url.is_empty() {
             return Err(self.reject(CoreError::InvalidInput("请填写目标地址".to_owned())));
+        }
+        if url.len() > MAX_URL_LEN {
+            return Err(self.reject(CoreError::InvalidInput(format!(
+                "目标地址过长：上限 {MAX_URL_LEN} 字节"
+            ))));
         }
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             return Err(self.reject(CoreError::InvalidInput(
@@ -1003,7 +1010,8 @@ async fn worker(index: u32, engine: Arc<Engine>, url: String, run: u64) {
     }
 }
 
-// ---------------------------------------------------------------------------// 无头单元测试：不启动任何窗口 / 浏览器即可验证核心逻辑
+// ---------------------------------------------------------------------------
+// 无头单元测试：不启动任何窗口 / 浏览器即可验证核心逻辑
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]

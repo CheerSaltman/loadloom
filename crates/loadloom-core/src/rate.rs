@@ -35,12 +35,17 @@ const CAPACITY_RATIO: f64 = 0.05;
 
 /// 把秒数换算成**有界**的 `Duration`。
 ///
-/// 纯函数，可单测。非有限、非正数的输入返回 [`Duration::ZERO`]；
+/// 纯函数，可单测。`NaN` 与非正数输入返回 [`Duration::ZERO`]；
 /// 超过 [`MAX_WAIT`] 的输入收敛到上限。这是「绝不用未校验的浮点构造
 /// `Duration`」这条约束的唯一出口。
 fn wait_from_seconds(seconds: f64) -> Duration {
-    if !seconds.is_finite() || seconds <= 0.0 {
+    // `+inf` 必须封顶而不是归零：把溢出当成「无需等待」会让限速在这条路径上
+    // 彻底失效（fail-open）。只有 `NaN` 与非正数才表示「不限速」。
+    if seconds.is_nan() || seconds <= 0.0 {
         return Duration::ZERO;
+    }
+    if seconds == f64::INFINITY {
+        return MAX_WAIT;
     }
     Duration::try_from_secs_f64(seconds)
         .unwrap_or(MAX_WAIT)
@@ -180,7 +185,9 @@ mod tests {
     #[test]
     fn wait_is_bounded_for_any_seconds_value() {
         assert_eq!(wait_from_seconds(f64::NAN), Duration::ZERO);
-        assert_eq!(wait_from_seconds(f64::INFINITY), Duration::ZERO);
+        // 溢出（`+inf`）必须封顶，不能被当成「无需等待」——那会让限速静默失效。
+        assert_eq!(wait_from_seconds(f64::INFINITY), MAX_WAIT);
+        assert_eq!(wait_from_seconds(f64::NEG_INFINITY), Duration::ZERO);
         assert_eq!(wait_from_seconds(-1.0), Duration::ZERO);
         assert_eq!(wait_from_seconds(0.0), Duration::ZERO);
         assert_eq!(
