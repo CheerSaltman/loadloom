@@ -215,7 +215,7 @@ struct Control {
     stop: AtomicBool,
     /// 目标并发数（在岗 worker 数）。
     threads: AtomicU32,
-    /// 运行代次（run identity）：每 `start()` 与 `stop()` 各递增一次。
+    /// 运行代次（run identity）：`start()` 与「真正停止一次运行」各递增一次。
     ///
     /// **为什么必须有它（真实竞态）**：worker 的循环条件原本只看 `stop`。
     /// 「stop → 立刻 start」时，一个正在 400ms 退避里休眠的旧 worker 会错过
@@ -645,25 +645,51 @@ impl Engine {
     }
 
     /// 停止打流（幂等）。
+    ///
+    /// 手动停止只作用于「当前正在运行的那一代」。
     pub fn stop(&self, reason: &str) {
-        self.control.stop.store(true, Ordering::Release);
+        self.stop_run(None, reason);
+    }
+
+    /// 停止某一代运行：状态切换与 `control` 的两个原子量在**同一次取锁**内完成。
+    ///
+    /// **为什么必须同锁（真实竞态）**：旧实现先在锁外写 `stop` 与代次，再取
+    /// `inner_lock()` 改 `inner.running`。并发的 `start()` 若在两步之间完成整个
+    /// 启动临界区（清 `stop`、开新代次、置 `running = true`），随后 `stop()` 拿到
+    /// 锁就会把**新的一代**标成已停止：快照显示待机，新一代 worker 却仍在打流，
+    /// `tick()` 的流量/时长自动停止守卫随之全部失效。原子量与 `running` 同锁更新
+    /// 后，`start()` 与停止互相串行，快照与 worker 看到的是同一个状态。
+    ///
+    /// `target` 是代次围栏：`tick()` 在锁内算出自动停止原因，但要到锁外才执行
+    /// （不持锁广播）；若这期间用户已停止并重新启动，带过期代次的停止直接放弃，
+    /// 不会误杀新任务。返回是否真的停止了这一次运行。
+    fn stop_run(&self, target: Option<u64>, reason: &str) -> bool {
+        let mut inner = self.inner_lock();
+        if !inner.running {
+            return false;
+        }
+        if let Some(run) = target {
+            if self.control.run.load(Ordering::Acquire) != run {
+                return false;
+            }
+        }
+
         // 同时作废当前代次：worker 不必依赖 `stop` 标志本身 —— 该标志会被
         // 紧随其后的 `start()` 清掉，只看它会让旧 worker 有机会「复活」。
+        self.control.stop.store(true, Ordering::Release);
         self.control.invalidate_run();
-        let mut inner = self.inner_lock();
-        if inner.running {
-            inner.elapsed_frozen = inner
-                .started
-                .map(|started| started.elapsed().as_secs_f64())
-                .unwrap_or(inner.elapsed_frozen);
-            inner.running = false;
-            inner.started = None;
-            inner.speed_bps = 0.0;
-            inner.status = reason.to_owned();
-            drop(inner);
-            self.log(LogLevel::Warn, reason.to_owned());
-            self.emit_event(RunEventKind::Stopped, reason.to_owned());
-        }
+        inner.elapsed_frozen = inner
+            .started
+            .map(|started| started.elapsed().as_secs_f64())
+            .unwrap_or(inner.elapsed_frozen);
+        inner.running = false;
+        inner.started = None;
+        inner.speed_bps = 0.0;
+        inner.status = reason.to_owned();
+        drop(inner);
+        self.log(LogLevel::Warn, reason.to_owned());
+        self.emit_event(RunEventKind::Stopped, reason.to_owned());
+        true
     }
 
     /// 运行中动态调整并发与限速。
@@ -798,12 +824,15 @@ impl Engine {
             } else {
                 inner.speed_bps = 0.0;
             }
-            reason
+            reason.map(|reason| (self.control.run.load(Ordering::Acquire), reason))
         };
 
-        if let Some(reason) = auto_stop {
-            self.stop(&reason);
-            self.emit_event(RunEventKind::AutoStopped, reason);
+        if let Some((run, reason)) = auto_stop {
+            // 代次围栏：算原因与执行停止之间用户可能已经停止并重新启动，
+            // 过期代次的自动停止必须放弃，否则会误杀刚启动的新任务。
+            if self.stop_run(Some(run), &reason) {
+                self.emit_event(RunEventKind::AutoStopped, reason);
+            }
         }
         let _ = self.metrics_tx.send(self.snapshot(false));
     }
@@ -1278,5 +1307,58 @@ mod tests {
         assert!(engine.is_running());
         assert_eq!(engine.snapshot(false).rate_mib, 1e-300);
         engine.stop("单测收尾");
+    }
+
+    /// 空转的 `stop()` 必须什么都不做。旧实现会在锁外写 `stop` 标志并作废代次，
+    /// 一旦它与 `start()` 的启动临界区交错，就会把刚启动的一代标成已停止：
+    /// 快照显示待机、worker 仍在打流。
+    #[test]
+    fn stop_while_idle_does_not_touch_control_state() {
+        let engine = Engine::spawn();
+        assert!(!engine.control.stop.load(Ordering::Acquire));
+        let run_before = engine.control.run.load(Ordering::Acquire);
+
+        engine.stop("空转停止");
+
+        assert!(
+            !engine.control.stop.load(Ordering::Acquire),
+            "空转的 stop() 不得留下停止标志：并发的 start() 会被它回写"
+        );
+        assert_eq!(
+            engine.control.run.load(Ordering::Acquire),
+            run_before,
+            "空转的 stop() 不得作废代次"
+        );
+        assert_eq!(engine.snapshot(false).phase, RunPhase::Idle);
+    }
+
+    /// 自动停止带代次围栏：`tick()` 算原因与执行停止之间用户若已停止并重新启动，
+    /// 过期代次的自动停止必须放弃，否则会误杀新任务。
+    #[test]
+    fn stale_auto_stop_cannot_kill_a_newer_run() {
+        let engine = Engine::spawn();
+        let request = StartRunRequest {
+            url: "https://example.test/file".to_owned(),
+            threads: 2,
+            rate_mib: 0.0,
+            limit_gb: 0.0,
+            limit_minutes: 0.0,
+            authorized: true,
+        };
+
+        engine.start(request.clone()).expect("首轮启动必须成功");
+        let stale_run = engine.control.run.load(Ordering::Acquire);
+        engine.stop("用户先停止");
+        engine.start(request).expect("用户重新启动必须成功");
+
+        assert!(
+            !engine.stop_run(Some(stale_run), "过期代次的自动停止"),
+            "过期代次不得停止当前运行"
+        );
+        assert!(engine.is_running(), "新任务不得被过期的自动停止误杀");
+
+        let current = engine.control.run.load(Ordering::Acquire);
+        assert!(engine.stop_run(Some(current), "当前代次的自动停止"));
+        assert!(!engine.is_running());
     }
 }

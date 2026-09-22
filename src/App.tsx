@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { LineChart } from "@/components/LineChart";
 import { useEngine } from "@/hooks/useEngine";
 import {
@@ -51,9 +51,20 @@ export default function App() {
   const [limitGb, setLimitGb] = useState(10);
   const [limitMinOn, setLimitMinOn] = useState(false);
   const [limitMin, setLimitMin] = useState(10);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const running = snapshot?.phase === "running";
+  const limitGbValid = Number.isFinite(limitGb) && limitGb > 0;
+  const limitMinValid = Number.isFinite(limitMin) && limitMin > 0;
   const url = useMemo(() => composeUrl(host, scheme, port, path), [host, scheme, port, path]);
+
+  // 并发与限速的权威在后端：请求 64 线程会被收敛到 MAX_WORKERS。这里把快照里的
+  // **实际生效值**回填给输入框，显示值不再与引擎真实状态背离。
+  useEffect(() => {
+    if (!snapshot) return;
+    setThreads(snapshot.threads);
+    setRateMib(snapshot.rateMib);
+  }, [snapshot?.threads, snapshot?.rateMib]);
 
   const toggleTheme = () => {
     const next = !dark;
@@ -66,19 +77,86 @@ export default function App() {
       url,
       threads,
       rateMib,
-      limitGb: limitGbOn ? limitGb : 0,
-      limitMinutes: limitMinOn ? limitMin : 0,
+      // 上限只在「已勾选 + 有限正数」时发送：0 在引擎里等于关闭自动停止。
+      limitGb: limitGbOn && limitGbValid ? limitGb : 0,
+      limitMinutes: limitMinOn && limitMinValid ? limitMin : 0,
       authorized: true,
     });
   };
 
-  const onThreads = (value: number) => {
-    setThreads(value);
-    if (running) void engine.patchLive({ threads: value, rateMib: null });
+  // 只接受有限数：`Number("") || 0` 会把「清空输入框」折算成 0（静默关掉
+  // 限速/上限），`1e999` 会变成 Infinity，JSON 序列化成 null 后只换来一句
+  // 英文参数错误。非有限值一律不送 IPC。
+  const parseFinite = (raw: string): number | null => {
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : null;
   };
-  const onRate = (value: number) => {
+
+  const onThreads = (raw: string) => {
+    const value = parseFinite(raw);
+    if (value === null) return;
+    // 后端字段是 u32：小数会被 serde 当成参数错误拒掉。这里只做整数化，
+    // 范围收敛仍归后端（1..=MAX_WORKERS），显示值随后由快照回填。
+    const next = Math.trunc(value);
+    setThreads(next);
+    if (running) void engine.patchLive({ threads: next, rateMib: null });
+  };
+  const onRate = (raw: string) => {
+    const value = parseFinite(raw);
+    if (value === null) return;
     setRateMib(value);
     if (running) void engine.patchLive({ threads: null, rateMib: value });
+  };
+
+  // 上限为 0 / 非有限值 = 引擎侧「没有上限」。绝不能让它带着勾选状态静默送出，
+  // 否则卡片仍写着「已设置自动停止」，而守卫根本没生效。
+  const rejectLimit = (label: string, setEnabled: (enabled: boolean) => void) => {
+    setEnabled(false);
+    setNotice(`${label}未生效：请输入大于 0 的数值`);
+  };
+
+  const onLimitGb = (raw: string) => {
+    const value = parseFinite(raw);
+    if (value === null) {
+      rejectLimit("流量上限", setLimitGbOn);
+      return;
+    }
+    // 0 / 负数照原样保留在输入框里，让用户看到自己输入的值，同时取消勾选。
+    setLimitGb(value);
+    if (value <= 0) {
+      rejectLimit("流量上限", setLimitGbOn);
+      return;
+    }
+    setNotice(null);
+  };
+  const onLimitMin = (raw: string) => {
+    const value = parseFinite(raw);
+    if (value === null) {
+      rejectLimit("时长上限", setLimitMinOn);
+      return;
+    }
+    setLimitMin(value);
+    if (value <= 0) {
+      rejectLimit("时长上限", setLimitMinOn);
+      return;
+    }
+    setNotice(null);
+  };
+  const onToggleLimitGb = (checked: boolean) => {
+    if (checked && !limitGbValid) {
+      rejectLimit("流量上限", setLimitGbOn);
+      return;
+    }
+    setNotice(null);
+    setLimitGbOn(checked);
+  };
+  const onToggleLimitMin = (checked: boolean) => {
+    if (checked && !limitMinValid) {
+      rejectLimit("时长上限", setLimitMinOn);
+      return;
+    }
+    setNotice(null);
+    setLimitMinOn(checked);
   };
 
   const speedSeries = history.map((point) => point.speedBps);
@@ -180,24 +258,24 @@ export default function App() {
               </div>
 
               <label className="mb-1 block text-[12px] text-muted">并发线程（运行中可调）</label>
-              <input type="number" value={threads} onChange={(e) => onThreads(Number(e.target.value) || 0)}
+              <input type="number" step={1} value={threads} onChange={(e) => onThreads(e.target.value)}
                 className="mb-3 w-full rounded-lg border border-line bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent" />
 
               <label className="mb-1 block text-[12px] text-muted">限速带宽（MB/s，0 = 不限速）</label>
-              <input type="number" step={0.5} value={rateMib} onChange={(e) => onRate(Number(e.target.value) || 0)}
+              <input type="number" step={0.5} value={rateMib} onChange={(e) => onRate(e.target.value)}
                 className="mb-3 w-full rounded-lg border border-line bg-surface-2 px-3 py-2 text-[13px] outline-none focus:border-accent" />
 
               <div className="mb-3 space-y-2 text-[12.5px]">
                 <label className="flex items-center gap-2">
-                  <input type="checkbox" checked={limitGbOn} onChange={(e) => setLimitGbOn(e.target.checked)} className="accent-[var(--accent)]" />
+                  <input type="checkbox" checked={limitGbOn} onChange={(e) => onToggleLimitGb(e.target.checked)} className="accent-[var(--accent)]" />
                   累计流量达到
-                  <input type="number" step={1} value={limitGb} onChange={(e) => setLimitGb(Number(e.target.value))}
+                  <input type="number" step={1} value={limitGb} onChange={(e) => onLimitGb(e.target.value)}
                     className="w-20 rounded-lg border border-line bg-surface-2 px-2 py-1" /> GB
                 </label>
                 <label className="flex items-center gap-2">
-                  <input type="checkbox" checked={limitMinOn} onChange={(e) => setLimitMinOn(e.target.checked)} className="accent-[var(--accent)]" />
+                  <input type="checkbox" checked={limitMinOn} onChange={(e) => onToggleLimitMin(e.target.checked)} className="accent-[var(--accent)]" />
                   运行时长达到
-                  <input type="number" step={1} value={limitMin} onChange={(e) => setLimitMin(Number(e.target.value))}
+                  <input type="number" step={1} value={limitMin} onChange={(e) => onLimitMin(e.target.value)}
                     className="w-20 rounded-lg border border-line bg-surface-2 px-2 py-1" /> 分钟
                 </label>
               </div>
@@ -213,8 +291,8 @@ export default function App() {
                 </button>
               </div>
 
-              <div className={cn("mt-3 min-h-[18px] text-[12.5px]", error ? "text-bad" : running ? "text-good" : "text-muted")}>
-                {error ?? snapshot?.status ?? "准备就绪 · 等待开始"}
+              <div className={cn("mt-3 min-h-[18px] text-[12.5px]", error ? "text-bad" : notice ? "text-warn" : running ? "text-good" : "text-muted")}>
+                {error ?? notice ?? snapshot?.status ?? "准备就绪 · 等待开始"}
               </div>
             </section>
 
