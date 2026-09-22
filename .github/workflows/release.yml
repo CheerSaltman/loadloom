@@ -16,6 +16,21 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: 校验 tag 与 Cargo.toml 版本一致
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          # 安装包文件名 LoadLoom_<版本>_x64-* 由 src-tauri/Cargo.toml 的 package.version
+          # （继承工作区 version）决定，tag 则是发布流程的版本源。两者不一致时，
+          # 构建出的文件名对不上后面的 gh release upload，必须在编译前就拦下。
+          MANIFEST_VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          echo "tag=$TAG_VERSION manifest=$MANIFEST_VERSION"
+          if [ "$TAG_VERSION" != "$MANIFEST_VERSION" ]; then
+            echo "::error::tag v$TAG_VERSION 与 Cargo.toml 的 $MANIFEST_VERSION 不一致"
+            exit 1
+          fi
+
       - name: 安装 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
 

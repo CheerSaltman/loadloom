@@ -63,9 +63,9 @@ Grab one of the three assets from [Releases](https://github.com/CheerSaltman/loa
 
 | File | Who it is for |
 | --- | --- |
-| `LoadLoom_0.4.0_x64-setup.exe` | **Most users.** NSIS installer with a Start Menu entry and an uninstaller |
-| `LoadLoom_0.4.0_x64_en-US.msi` | Enterprise deployment via Group Policy or silent install (`msiexec /i`) |
-| `LoadLoom_0.4.0_x64-portable.exe` | Portable, no installation — just double-click |
+| `LoadLoom_<version>_x64-setup.exe` | **Most users.** NSIS installer with a Start Menu entry and an uninstaller |
+| `LoadLoom_<version>_x64_en-US.msi` | Enterprise deployment via Group Policy or silent install (`msiexec /i`) |
+| `LoadLoom_<version>_x64-portable.exe` | Portable, no installation — just double-click |
 
 > Requirements: Windows 10/11 x64 plus the **WebView2 Runtime** (bundled with Windows 11 and recent Windows 10 builds; if it is missing, install the [Evergreen Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) once).
 
@@ -79,7 +79,7 @@ See [Building from source](#building-from-source).
 
 ### 1. Launch
 
-Open **LoadLoom** from the Start Menu, or double-click `LoadLoom_0.4.0_x64-portable.exe`.
+Open **LoadLoom** from the Start Menu, or double-click `LoadLoom_<version>_x64-portable.exe`.
 On first launch it creates its log directory: `%LOCALAPPDATA%\LoadLoom\logs\loadloom.log`.
 
 ### 2. Confirm you are authorized
@@ -212,7 +212,7 @@ npm install
 npm run typecheck          # tsc --noEmit
 npm run build              # emits the frontend into dist/
 
-cargo test --locked -p loadloom-core   # 18 tests, no graphical environment needed
+cargo test --locked -p loadloom-core   # all core tests, no graphical environment needed
 npm run desktop:dev        # development: hot-reloading native window
 npm run desktop:build      # packaging: produces exe + NSIS + MSI
 ```
@@ -221,8 +221,8 @@ Build outputs:
 
 ```text
 target/release/loadloom-desktop.exe                       ← portable executable
-target/release/bundle/nsis/LoadLoom_0.4.0_x64-setup.exe   ← NSIS installer
-target/release/bundle/msi/LoadLoom_0.4.0_x64_en-US.msi    ← MSI installer
+target/release/bundle/nsis/LoadLoom_<version>_x64-setup.exe   ← NSIS installer
+target/release/bundle/msi/LoadLoom_<version>_x64_en-US.msi    ← MSI installer
 ```
 
 Development workflow, quality gates and the release procedure live in [docs/development.md](docs/development.md) (in Chinese).
