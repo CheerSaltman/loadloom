@@ -92,16 +92,19 @@ fn quit_app(app: AppHandle) {
     app.exit(0);
 }
 
-/// 返回日志文件路径（供界面展示，便于用户自行排查）。
+/// 返回**实际生效**的日志文件路径（供界面展示，便于用户自行排查）。
+///
+/// 主目录不可写时日志会降级到临时目录，这里返回的就是降级后的那一个；
+/// 连临时目录都写不了（`None`）时前端应显示「未落盘」，而不是一个并不存在的路径。
 #[tauri::command]
-fn get_log_path() -> String {
-    logging::log_file().display().to_string()
+fn get_log_path() -> Option<String> {
+    logging::active_log_file().map(|path| path.display().to_string())
 }
 
-/// 在资源管理器中打开日志目录。
+/// 在资源管理器中打开**实际生效**的日志目录。
 #[tauri::command]
 fn open_log_dir() -> Result<String, String> {
-    let dir = logging::log_dir();
+    let dir = logging::active_log_dir();
     std::fs::create_dir_all(&dir).map_err(|error| format!("无法创建日志目录：{error}"))?;
     std::process::Command::new("explorer")
         .arg(&dir)
@@ -133,7 +136,7 @@ pub fn run() {
             let mut logs = engine.subscribe_logs();
             tauri::async_runtime::spawn(async move {
                 while let Ok(entry) = logs.recv().await {
-                    logging::write(logging::level_label(entry.level), &entry.message);
+                    logging::write(entry.level, &entry.message);
                     let _ = log_handle.emit(EVENT_LOG, entry);
                 }
             });

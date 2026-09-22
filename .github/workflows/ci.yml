@@ -74,3 +74,5 @@ jobs:
         run: npm run build
       - name: 编译桌面壳
         run: cargo check --locked -p loadloom-desktop
+      - name: 桌面壳单元测试（日志格式与体积轮转）
+        run: cargo test --locked -p loadloom-desktop --lib
