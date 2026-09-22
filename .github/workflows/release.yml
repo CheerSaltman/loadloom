@@ -1,21 +1,30 @@
 name: Release
 
 # 推 tag 即发布：构建 Windows 产物并挂到同名 Release 上。
+#
+# 为什么拆成两个 job（信任边界）：
+#   * build 会执行 npm ci / cargo build / npm run desktop:build —— 依赖树里任何
+#     一段构建期脚本都在此取得执行权，因此它只有 contents: read，拿不到写权限，
+#     产物经 artifact 传递；
+#   * publish 只有 contents: write，且**不检出仓库**（用 GH_REPO 显式指定目标），
+#     需要写权限的步骤里不再执行任何第三方构建脚本。
 on:
   push:
     tags:
       - "v*"
 
+# 默认最小权限：写权限只在 publish job 里单独授予。
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
-    name: build & publish (windows)
+  build:
+    name: build (windows)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
-
+      # 所有 action 以 commit SHA 固定而非可移动的 tag / 分支：tag 可以被上游重新
+      # 指向，SHA 不能 —— 否则上游一次改动就等于往本仓库的发布链路里塞代码。
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: 校验 tag 与 Cargo.toml 版本一致
         shell: bash
         run: |
@@ -23,42 +32,66 @@ jobs:
           TAG_VERSION="${GITHUB_REF_NAME#v}"
           # 安装包文件名 LoadLoom_<版本>_x64-* 由 src-tauri/Cargo.toml 的 package.version
           # （继承工作区 version）决定，tag 则是发布流程的版本源。两者不一致时，
-          # 构建出的文件名对不上后面的 gh release upload，必须在编译前就拦下。
+          # 构建出的文件名对不上后面的发布步骤，必须在编译前就拦下。
           MANIFEST_VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
           echo "tag=$TAG_VERSION manifest=$MANIFEST_VERSION"
           if [ "$TAG_VERSION" != "$MANIFEST_VERSION" ]; then
             echo "::error::tag v$TAG_VERSION 与 Cargo.toml 的 $MANIFEST_VERSION 不一致"
             exit 1
           fi
-
-      - name: 安装 Rust 工具链
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: 缓存 cargo 构建产物
-        uses: swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2
         with:
           workspaces: src-tauri
-
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
           cache: npm
-
       - name: 安装前端依赖
         run: npm ci
-
       - name: 质量门禁
         run: |
           cargo test --locked -p loadloom-core
           npm run typecheck
-
       - name: 构建原生安装包
         run: npm run desktop:build
+      - name: 整理待发布产物
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p dist-release
+          # Portable build: cargo emits target/release/loadloom-desktop.exe, but on the
+          # release page every asset follows the same LoadLoom_<version>_x64-* scheme.
+          cp "target/release/loadloom-desktop.exe" "dist-release/LoadLoom_${VERSION}_x64-portable.exe"
+          cp "target/release/bundle/nsis/LoadLoom_${VERSION}_x64-setup.exe" dist-release/
+          cp "target/release/bundle/msi/LoadLoom_${VERSION}_x64_en-US.msi" dist-release/
+          ls -l dist-release
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: loadloom-windows
+          path: dist-release/
+          if-no-files-found: error
 
+  publish:
+    name: publish
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      # 不 checkout：这个 job 手里有写权限，仓库内容与构建脚本都不该进来。
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: loadloom-windows
+          path: dist-release
       - name: 上传产物到 Release
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
@@ -69,14 +102,8 @@ jobs:
                  --title "LoadLoom $GITHUB_REF_NAME" \
                  --notes "本次变更见 CHANGELOG.md。"
 
-          # Portable build: cargo emits target/release/loadloom-desktop.exe, but on the
-          # release page every asset follows the same LoadLoom_<version>_x64-* scheme.
-          # The local build artifact keeps its original name.
-          cp "target/release/loadloom-desktop.exe" \
-             "target/release/LoadLoom_${VERSION}_x64-portable.exe"
-
           gh release upload "$GITHUB_REF_NAME" \
-            "target/release/LoadLoom_${VERSION}_x64-portable.exe" \
-            "target/release/bundle/nsis/LoadLoom_${VERSION}_x64-setup.exe" \
-            "target/release/bundle/msi/LoadLoom_${VERSION}_x64_en-US.msi" \
+            "dist-release/LoadLoom_${VERSION}_x64-portable.exe" \
+            "dist-release/LoadLoom_${VERSION}_x64-setup.exe" \
+            "dist-release/LoadLoom_${VERSION}_x64_en-US.msi" \
             --clobber

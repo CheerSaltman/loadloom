@@ -20,9 +20,12 @@
 //! * **永不 panic**：日志设施自身失败（磁盘满、权限不足、互斥锁中毒）绝不能反过来
 //!   拖垮应用 —— 那正是它最该派上用场的时刻。落盘失败就降级为「只上屏」，不中断启动。
 //! * **不撒谎**：界面拿到的日志路径必须是**真正在写**的那一个；退回临时目录时也要如实反映。
-//! * **不让内容越权**：日志正文可能来自远端（错误文本、响应片段），其中的换行与
-//!   控制字符会被编码（见 `sanitize`），否则攻击者可以伪造出额外的日志行
-//!   （CWE-117 日志注入），让「运行日志」页与磁盘日志都出现由他编排的记录。
+//! * **不让内容越权**：日志正文可能来自远端（错误文本、响应片段），其中的换行、
+//!   控制字符、行分隔符与格式字符都会被编码（见 `sanitize`），否则攻击者可以伪造出
+//!   额外的日志行（CWE-117 日志注入）、甚至改写整行的显示顺序，让「运行日志」页与
+//!   磁盘日志都出现由他编排的记录；
+//! * **两条出口同一份编码**：落盘与上屏共用 `encoded_entry`，否则未编码的那条通道
+//!   就是绕过上一条约束的后门。
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -32,7 +35,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tauri::AppHandle;
 
-use loadloom_core::{Engine, LogLevel};
+use loadloom_core::{Engine, LogEntry, LogLevel};
 
 /// 单文件上限，超过则轮转为 `loadloom.prev.log`。
 const MAX_LOG_BYTES: u64 = 4 * 1024 * 1024;
@@ -119,7 +122,7 @@ fn sanitize(message: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            _ if character.is_control() => {
+            _ if character.is_control() || is_format(character) => {
                 out.push_str(&format!("\\u{{{:04X}}}", character as u32));
             }
             _ => out.push(character),
@@ -129,6 +132,43 @@ fn sanitize(message: &str) -> String {
         out.push('…');
     }
     out
+}
+
+/// 「不属于 Cc，却能破坏一行日志」的字符：格式字符（Cf）与行 / 段分隔符（Zl / Zp）。
+///
+/// * Cf（U+200B..=U+200F、U+202A..=U+202E、U+2060..=U+2064、U+2066..=U+206F 等）：
+///   不可见，但零宽字符能藏内容、双向覆写能颠倒显示顺序；
+/// * Zl / Zp（U+2028 / U+2029）：多数渲染器视为换行，等同伪造一行。
+///
+/// 为什么不能只查 `char::is_control()`：它只覆盖 Cc，上述两类整片漏掉 ——
+/// 漏掉一个，编码就等于没做。
+fn is_format(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x061C
+            | 0x200B..=0x200F
+            | 0x2028..=0x202E
+            | 0x2060..=0x2064
+            | 0x2066..=0x206F
+            | 0xFEFF
+            | 0xFFF9..=0xFFFB
+            | 0x110BD
+            | 0x110CD
+            | 0xE0001
+            | 0xE0020..=0xE007F
+    )
+}
+
+/// 把一条日志条目编码成可以安全交给界面的副本。
+///
+/// 落盘与上屏（`EVENT_LOG` 事件流）是两条出口，但**必须**共用同一次编码：只要
+/// 有一条通道漏编码，攻击者就能只在其中一条上伪造日志行或改写显示顺序，而
+/// 「两条出口一致」正是本模块的前提。
+pub(crate) fn encoded_entry(entry: LogEntry) -> LogEntry {
+    LogEntry {
+        message: sanitize(&entry.message),
+        ..entry
+    }
 }
 
 /// `YYYY-MM-DD HH:MM:SS.mmmZ`（UTC）。
@@ -548,5 +588,38 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn separators_and_format_characters_cannot_break_a_line() {
+        // 回归点（CWE-117 的另一半）：U+2028 / U+2029 在多数渲染器里就是换行，
+        // Cf 里的双向覆写还能把后写的内容显示到前面 —— 两者都不在 Cc 里，
+        // 只查 is_control() 会整片漏掉。
+        assert_eq!(sanitize("a\u{2028}b"), "a\\u{2028}b");
+        assert_eq!(sanitize("a\u{2029}b"), "a\\u{2029}b");
+        assert_eq!(sanitize("safe\u{202E}gnp.exe"), "safe\\u{202E}gnp.exe");
+        assert_eq!(sanitize("\u{200F}reversed"), "\\u{200F}reversed");
+        assert_eq!(sanitize("bom\u{FEFF}"), "bom\\u{FEFF}");
+        assert_eq!(sanitize("zwsp\u{200B}"), "zwsp\\u{200B}");
+        // 正常文本（中日文与 emoji）不受影响。
+        assert_eq!(sanitize("连接正常 🚀"), "连接正常 🚀");
+    }
+
+    #[test]
+    fn the_webview_copy_uses_the_same_encoding_as_the_file() {
+        // 上屏与落盘必须同源：少编码一条通道，等于给攻击者留一条后门。
+        let entry = LogEntry {
+            level: LogLevel::Error,
+            message: "boom\u{2028}2026-01-01 00:00:00.000Z [ERROR] 伪造的崩溃".to_owned(),
+            at_ms: 7,
+        };
+        let encoded = encoded_entry(entry);
+        assert_eq!(encoded.at_ms, 7);
+        assert_eq!(encoded.level, LogLevel::Error);
+        assert_eq!(
+            encoded.message,
+            "boom\\u{2028}2026-01-01 00:00:00.000Z [ERROR] 伪造的崩溃"
+        );
+        assert!(!encoded.message.contains('\u{2028}'));
     }
 }

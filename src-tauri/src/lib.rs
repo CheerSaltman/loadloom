@@ -138,7 +138,9 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 while let Ok(entry) = logs.recv().await {
                     logging::write(entry.level, &entry.message);
-                    let _ = log_handle.emit(EVENT_LOG, entry);
+                    // 上屏的那一份同样走编码：两条出口共用同一次编码，否则事件流
+                    // 就是绕过日志编码的后门（见 logging::encoded_entry）。
+                    let _ = log_handle.emit(EVENT_LOG, logging::encoded_entry(entry));
                 }
             });
 

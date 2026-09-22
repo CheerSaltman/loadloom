@@ -1,5 +1,21 @@
 # 变更日志
 
+## 0.4.6
+
+### 安全修复
+
+- **停止之后在途请求仍在跑（中危）**：`stop()` 只拦得住「下一次请求」，已经发出去的那一次最长会拖到连接（10s）/ 读取（30s）超时 —— 用户按下停止后流量仍在继续。现在请求整体与停止信号赛跑，最迟 25ms 内放弃在途请求与响应体。
+- **日志编码只覆盖了控制字符（低危）**：`sanitize` 只查 `char::is_control()`（Cc），漏掉 U+2028 / U+2029（Zl / Zp，多数渲染器视为换行）与 Cf（含双向覆写 U+202E，可颠倒整行的显示顺序）；同时 webview 的 `loadloom://log` 事件流直接发原始文本，是绕过编码的后门。现在两类字符一并编码，且落盘与上屏共用同一份编码（`encoding::encoded_entry`）。
+
+### 发布链路
+
+- **发布 job 不再同时持有写权限与构建脚本（中危）**：`release.yml` 拆成 `build`（`contents: read`，跑 npm ci / cargo build）与 `publish`（`contents: write`，不检出仓库，只下载 artifact 后上传），产物经 artifact 传递；所有 action 改为按 commit SHA 固定，不再使用可移动的 tag / 分支。
+
+### 其它
+
+- `start()` 的「已收敛」告警移到「已在运行」判定之后：一次注定被拒绝的启动不再在日志里留下噪音，掩盖真正生效的那次收敛。
+- `set_live_config` 收敛限速值时同样明确告知（原先静默生效 —— 限速是用户对第三方的承诺，不该悄悄改）。
+
 本文件格式遵循 [Keep a Changelog 1.1.0](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本 2.0.0](https://semver.org/lang/zh-CN/)。
 

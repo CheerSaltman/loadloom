@@ -77,6 +77,10 @@ const BACKOFF_BASE_MS: u64 = 400;
 const BACKOFF_MAX_MS: u64 = 3_200;
 /// 退避的分片粒度：每片结束后重新校验运行代次，让 `stop()` 不必等满整个退避。
 const BACKOFF_SLICE: Duration = Duration::from_millis(100);
+/// 停止判定的轮询间隔。在途请求靠它和「停止」赛跑：用户按下停止后流量最迟
+/// 在 25ms 内停下，而不是把连接 / 读取超时（10s / 30s）跑完 —— 只做到
+/// 「不再发起新请求」等于让流量在用户以为已经停止之后继续打出去。
+const CANCEL_POLL: Duration = Duration::from_millis(25);
 /// `User-Agent`。版本号取自包元数据，避免手写字面量随版本漂移（旧值恒为 `0.4`）。
 const USER_AGENT: &str = concat!(
     "loadloom/",
@@ -537,21 +541,6 @@ impl Engine {
             "时长上限",
         ))?;
 
-        // 被收敛过就必须说清楚：限速值与安全停止边界是用户对第三方的承诺，
-        // 静默修改等于让用户以为约束生效了。
-        for (requested, applied, label) in [
-            (request.limit_gb, limit_gb, "流量上限"),
-            (request.limit_minutes, limit_minutes, "时长上限"),
-            (request.rate_mib, rate_mib, "限速值"),
-        ] {
-            if applied != requested {
-                self.log(
-                    LogLevel::Warn,
-                    format!("{label}已按引擎允许范围收敛：请求 {requested:e} → 实际 {applied:.3}"),
-                );
-            }
-        }
-
         // 将“是否已运行”的检查和状态切换放在同一把锁内。Tauri command 可以并发
         // 调用，原先在这里分两次取锁会让两个 start 都观察到 Idle，继而各自拉起一组
         // worker。先标记 Running 后再释放锁，保证同一时刻只有一个调用能赢得启动权。
@@ -592,6 +581,24 @@ impl Engine {
             inner.last_tick = Instant::now();
             run
         };
+
+        // 被收敛过就必须说清楚：限速值与安全停止边界是用户对第三方的承诺，
+        // 静默修改等于让用户以为约束生效了。
+        //
+        // 播报刻意放在「已在运行」判定之后：一次注定被拒绝的启动不该在日志里
+        // 留下「已收敛」的记录，那会把真正生效的那一次掩盖掉。
+        for (requested, applied, label) in [
+            (request.limit_gb, limit_gb, "流量上限"),
+            (request.limit_minutes, limit_minutes, "时长上限"),
+            (request.rate_mib, rate_mib, "限速值"),
+        ] {
+            if applied != requested {
+                self.log(
+                    LogLevel::Warn,
+                    format!("{label}已按引擎允许范围收敛：请求 {requested:e} → 实际 {applied:.3}"),
+                );
+            }
+        }
 
         for index in 0..MAX_WORKERS {
             let engine = Arc::clone(self);
@@ -665,10 +672,23 @@ impl Engine {
     /// 畸形载荷（`NaN`、超出范围的速率）必须让用户看见，而不是变成一次
     /// 悄无声息的「限速被关掉」。校验在取锁之前完成，避免持锁做广播。
     pub fn set_live(&self, patch: LiveConfigPatch) -> Result<(), CoreError> {
-        let rate_mib = match patch.rate_mib {
+        let requested_rate = patch.rate_mib;
+        let rate_mib = match requested_rate {
             Some(value) => Some(self.checked(sanitize_rate_mib(value))?),
             None => None,
         };
+
+        // 与 start() 同一口径：被收敛过就必须说清楚。运行中悄悄把限速换成别的
+        // 数值，用户会以为新的限速已经生效 —— 而它正是用户对第三方做出的承诺。
+        // 在取锁之前播报，避免持锁做广播。
+        if let (Some(requested), Some(applied)) = (requested_rate, rate_mib) {
+            if requested != applied {
+                self.log(
+                    LogLevel::Warn,
+                    format!("限速值已按引擎允许范围收敛：请求 {requested:e} → 实际 {applied:.3}"),
+                );
+            }
+        }
 
         let mut inner = self.inner_lock();
         if let Some(value) = patch.threads {
@@ -866,6 +886,19 @@ fn jitter_ms(seed: u64, span: u64) -> u64 {
 ///
 /// 固定 `sleep(400ms)` 有两个问题：32 个 worker 会踩着同一节拍一起重试
 /// （对已经不健康的源站形成惊群），以及 `stop()` 最坏要等满整个退避才生效。
+/// 等待本轮运行被停止（来自 stop()，或新一轮 start() 让本代次作废）。
+///
+/// 为什么需要它：worker 循环顶部的 is_active 检查只拦得住**下一次**请求，
+/// 拦不住已经发出去的那一次 —— 在途请求最长会拖到连接超时（10s）或读取超时
+/// （30s），用户按下停止之后流量仍在继续，这与「安全停止」的承诺相悖。
+/// 把请求整个包进 select! 里与它赛跑，停止就从「不再发新的」变成
+/// 「已经发出去的也立刻停」。
+async fn wait_for_stop(engine: &Engine, run: u64) {
+    while engine.control.is_active(run) {
+        tokio::time::sleep(CANCEL_POLL).await;
+    }
+}
+
 async fn backoff(engine: &Engine, run: u64, index: u32, failures: u32) {
     let capped = BACKOFF_BASE_MS
         .saturating_mul(1_u64 << failures.min(4))
@@ -916,13 +949,20 @@ async fn worker(index: u32, engine: Arc<Engine>, url: String, run: u64) {
         let started = Instant::now();
         engine.metrics.request_started();
 
-        let result = client
-            .get(&target)
-            .header("Cache-Control", "no-cache, no-store, max-age=0")
-            .header("Pragma", "no-cache")
-            .header("Accept-Encoding", "identity")
-            .send()
-            .await;
+        // 在途请求与「停止」赛跑：停止生效后立刻丢下这次请求（并如实收尾在途
+        // 计数），而不是让超时替用户决定流量什么时候停。
+        let result = tokio::select! {
+            result = client
+                .get(&target)
+                .header("Cache-Control", "no-cache, no-store, max-age=0")
+                .header("Pragma", "no-cache")
+                .header("Accept-Encoding", "identity")
+                .send() => result,
+            _ = wait_for_stop(&engine, run) => {
+                engine.metrics.request_finished();
+                return;
+            }
+        };
 
         match result {
             Ok(response) => {
@@ -945,7 +985,18 @@ async fn worker(index: u32, engine: Arc<Engine>, url: String, run: u64) {
                 let mut healthy = true;
                 let mut scaled_down = false;
 
-                while let Some(chunk) = stream.next().await {
+                loop {
+                    let chunk = tokio::select! {
+                        chunk = stream.next() => chunk,
+                        // 响应体读到一半被停止：同样立刻放弃，不再把一个可能
+                        // 长达 READ_TIMEOUT 的读取跑完。
+                        _ = wait_for_stop(&engine, run) => {
+                            healthy = false;
+                            break;
+                        }
+                    };
+                    let Some(chunk) = chunk else { break };
+
                     if !engine.control.is_active(run) {
                         healthy = false;
                         break;
