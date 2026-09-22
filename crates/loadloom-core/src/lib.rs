@@ -13,10 +13,13 @@ pub mod codes;
 pub mod contract;
 pub mod engine;
 mod metrics;
+pub mod nic;
 mod rate;
 
 pub use contract::{
     CoreError, EngineLimits, ErrorCount, HistoryPoint, LiveConfigPatch, LogEntry, LogLevel,
-    MetricsSnapshot, RunEvent, RunEventKind, RunPhase, StartRunRequest,
+    MetricsSnapshot, NicAdapterClass, NicAdapterDto, NicAdapterHistory, NicEvent, NicEventKind,
+    NicLinkState, NicSeriesPoint, NicSnapshot, RunEvent, RunEventKind, RunPhase, StartRunRequest,
 };
 pub use engine::Engine;
+pub use nic::NicMonitor;

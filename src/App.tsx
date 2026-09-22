@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { LineChart } from "@/components/LineChart";
+import { NicPanel } from "@/components/NicPanel";
+import { useNic } from "@/hooks/useNic";
 import { useEngine } from "@/hooks/useEngine";
 import { commands, type LogLevel } from "@/bindings";
 import {
@@ -62,9 +64,12 @@ function shouldReportError(key: string): boolean {
 
 export default function App() {
   const engine = useEngine();
+  // 网卡监测与打流各自独立推流：曲线与事件按 500ms 一帧进入同一个界面，
+  // 但互不阻塞 —— 打流停止后链路监测仍在继续。
+  const nic = useNic();
   const { snapshot, history, logs, connection, error, lastEvent, logPath } = engine;
 
-  const [tab, setTab] = useState<"console" | "logs">("console");
+  const [tab, setTab] = useState<"console" | "logs" | "nic">("console");
   const [dark, setDark] = useState(true);
   const [scheme, setScheme] = useState("https");
   const [host, setHost] = useState("");
@@ -358,6 +363,7 @@ export default function App() {
         <nav className="mt-7 flex flex-col gap-1">
           {([
             ["console", "实时监控"],
+            ["nic", "网卡监测"],
             ["logs", `运行日志${logs.length ? ` (${logs.length})` : ""}`],
           ] as const).map(([key, label]) => (
             <button
@@ -538,7 +544,7 @@ export default function App() {
               </div>
             </section>
           </div>
-        ) : (
+        ) : tab === "logs" ? (
           <section className="flex min-h-0 flex-1 flex-col p-5">
             <div className="mb-3 flex flex-wrap items-center gap-2">
               <h2 className="text-[14px] font-bold">运行日志（Event 推流）</h2>
@@ -617,6 +623,8 @@ export default function App() {
               )}
             </div>
           </section>
+        ) : (
+          <NicPanel nic={nic} />
         )}
       </main>
     </div>

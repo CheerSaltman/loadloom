@@ -179,3 +179,179 @@ pub enum CoreError {
     #[error("{0}")]
     Internal(String),
 }
+
+// ---------------------------------------------------------------------------
+// 网卡链路监测
+// ---------------------------------------------------------------------------
+
+/// 适配器类别 —— 与 `nicmon::AdapterClass` 的线格式一一对应。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum NicAdapterClass {
+    /// 物理网卡（默认纳入监测）。
+    Physical,
+    /// 虚拟网卡（Hyper-V / VMware / VPN 客户端……）。
+    Virtual,
+    /// 软件回环。
+    Loopback,
+    /// 隧道（Teredo / ISATAP / 6to4……）。
+    Tunnel,
+    /// 其它接口（点对点端点等）。
+    Other,
+}
+
+impl From<nicmon::AdapterClass> for NicAdapterClass {
+    fn from(class: nicmon::AdapterClass) -> Self {
+        match class {
+            nicmon::AdapterClass::Physical => NicAdapterClass::Physical,
+            nicmon::AdapterClass::Virtual => NicAdapterClass::Virtual,
+            nicmon::AdapterClass::Loopback => NicAdapterClass::Loopback,
+            nicmon::AdapterClass::Tunnel => NicAdapterClass::Tunnel,
+            nicmon::AdapterClass::Other => NicAdapterClass::Other,
+        }
+    }
+}
+
+/// 链路状态（把操作状态、连接状态与驱动标志位归成一个用户能懂的判断）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum NicLinkState {
+    /// 已连接且可用。
+    Connected,
+    /// 已断开（网线拔出 / 无线未关联 / 驱动标志位说未连接）。
+    Disconnected,
+    /// 休眠等待（例如等待 Wi-Fi 关联或拨号）。
+    Dormant,
+    /// 设备不存在（已拔出 / 已禁用；历史残留条目常见）。
+    NotPresent,
+    /// 无法判定。
+    Unknown,
+}
+
+/// 监测事件类别。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum NicEventKind {
+    LinkUp,
+    LinkDown,
+    SpeedChange,
+    CounterReset,
+    DiscardSpike,
+    ErrorSpike,
+    QueueBacklog,
+    AdapterAdded,
+    AdapterRemoved,
+    Selection,
+}
+
+/// 实时曲线点（收 / 发速率与利用率）。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct NicSeriesPoint {
+    pub rx_bps: f64,
+    pub tx_bps: f64,
+    /// 收方向利用率百分比（`0..=100`）。
+    pub rx_utilization: f64,
+    /// 发方向利用率百分比（`0..=100`）。
+    pub tx_utilization: f64,
+}
+
+/// 单块网卡的历史序列（**仅握手帧**填充，流帧恒为空数组）。
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct NicAdapterHistory {
+    pub id: String,
+    pub points: Vec<NicSeriesPoint>,
+}
+
+/// 一块网卡的实时状态与累计读数。
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct NicAdapterDto {
+    /// 稳定标识（LUID）：重插网卡、接口索引变化后依然是同一块网卡。
+    pub id: String,
+    /// 系统名称（「以太网 2」「WLAN」）。
+    pub name: String,
+    /// 驱动描述（芯片型号 / 厂商）。
+    pub description: String,
+    pub class: NicAdapterClass,
+    /// 介质标签（以太网 / Wi-Fi / 移动宽带……）。
+    pub media: String,
+    /// MAC 地址；无物理地址时为空串。
+    pub mac: String,
+    pub mtu: u32,
+    pub link_state: NicLinkState,
+    /// 运行状态的中文标签（日志与报告引用同一份翻译）。
+    pub oper_status: String,
+    pub admin_enabled: bool,
+    /// 协商发送速率（bit/s，0 = 未知）。
+    pub transmit_speed_bps: f64,
+    /// 协商接收速率（bit/s，0 = 未知）。
+    pub receive_speed_bps: f64,
+    /// 是否正在被采样（未采样时下面所有实时字段恒为 0，界面据此显示「未监测」）。
+    pub monitored: bool,
+    /// 是否被用户显式勾选（`false` 表示来自「默认纳入物理网卡」）。
+    pub selected: bool,
+    pub rx_bps: f64,
+    pub tx_bps: f64,
+    pub rx_utilization: f64,
+    pub tx_utilization: f64,
+    /// 发送队列当前积压的包数（`OutQLen`）。
+    pub out_queue_len: u64,
+    /// 是否处于队列积压状态（阈值判定结果，界面用它染红）。
+    pub queue_backlog: bool,
+    pub rx_discards_per_sec: f64,
+    pub tx_discards_per_sec: f64,
+    pub rx_errors_per_sec: f64,
+    pub tx_errors_per_sec: f64,
+    pub rx_bytes_total: u64,
+    pub tx_bytes_total: u64,
+    pub rx_discards_total: u64,
+    pub tx_discards_total: u64,
+    pub rx_errors_total: u64,
+    pub tx_errors_total: u64,
+    pub rx_unknown_protos_total: u64,
+}
+
+/// 监测事件 —— 事件流的「发生了什么」，与日志同源同码。
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct NicEvent {
+    /// 相对进程启动的毫秒时间戳（与日志时间轴一致，便于对齐）。
+    pub at_ms: u64,
+    pub adapter_id: String,
+    pub adapter: String,
+    pub kind: NicEventKind,
+    /// 稳定事件码（见 [`crate::codes::nic`]）。
+    pub code: String,
+    /// 是否已结束（尖峰类事件的收尾记录为 `true`，界面用普通样式显示）。
+    pub resolved: bool,
+    pub message: String,
+}
+
+/// 网卡监测快照 —— Command `get_nic_snapshot` 的返回值，也是 Event 推流的帧。
+///
+/// * `history` **仅在握手帧**（`get_nic_snapshot(true)`）填充，流帧恒为空数组；
+/// * `adapters` 只包含**正在监测**的网卡；完整清单（含虚拟 / 隧道）走
+///   Command `list_nic_adapters` —— 44 个接口的长字符串没必要每 500ms 重传一遍。
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct NicSnapshot {
+    /// 单调递增序号，用于前端丢弃乱序帧。
+    pub seq: u64,
+    /// 当前平台是否支持读取网卡计数器。
+    pub supported: bool,
+    /// 平台说明与**不可获取项**的如实交代（温度、缓冲区占用率等）。
+    pub note: String,
+    /// 采样任务是否在运行。
+    pub sampling: bool,
+    pub sample_ms: u32,
+    /// 用户显式勾选的适配器 id（空 = 默认只监测物理网卡）。
+    pub selection: Vec<String>,
+    pub adapters: Vec<NicAdapterDto>,
+    /// 最近事件（新的在前，最多保留 [`crate::nic::NIC_EVENT_LIMIT`] 条）。
+    pub events: Vec<NicEvent>,
+    /// 最近一次采样失败的原因（成功后清空）。
+    pub last_error: String,
+    pub history: Vec<NicAdapterHistory>,
+}

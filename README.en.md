@@ -52,6 +52,7 @@ The contract between the two sides is defined in `contract.rs`; the frontend's `
 | **Crash forensics** | A panic hook writes both to the log file and to the in-app "Run log" page |
 | **Native window** | Tauri v2 with the system WebView2; it listens on no ports and spawns no browser process |
 | **Tray resident** | The close button minimizes to the tray (it does not exit); quit from the tray menu |
+| **NIC link monitoring** | Link up/down, negotiated speed, rx/tx utilization, discards, errors, and the tx queue — on the same timeline as the traffic log (Windows; metrics that consumer hardware does not expose are stated as such, never fabricated) |
 
 ---
 
@@ -115,12 +116,36 @@ While a run is active you can change concurrency and rate limit on the fly.
 - You press **Stop** → a `stopped` event is pushed.
 - You click the window's close button → it only minimizes to the tray; traffic keeps running. To really quit, use **Quit** in the tray context menu.
 
-### 6. Troubleshooting
+### 6. NIC monitoring (diagnosing "it suddenly slowed down")
+
+The third tab is **NIC monitoring** (Windows). It shares one timeline with the traffic run and
+answers a single question: is the slowdown the origin's problem, or the local link's? It samples
+every 500 ms and keeps a 2-minute chart.
+
+| What you can see | Notes |
+| --- | --- |
+| Link up / down | Down is logged as `NIC-010`; recovery includes the outage duration (`NIC-011`) |
+| Negotiated speed | e.g. 1 Gbps dropping to 100 Mbps (`NIC-012`) — cable / port / Wi-Fi problems become obvious |
+| Rx / tx utilization | Live rate ÷ negotiated speed, showing the headroom left on the link |
+| Discards / errors | Recorded as *episodes* with a start and an end, plus peak value and duration (`NIC-020` ~ `NIC-023`) |
+| Tx queue | `OutQLen` sustained above 16 packets is logged as backlog (`NIC-024` / `NIC-025`) — the driver cannot keep up |
+| Event timeline | Every change in time order, directly comparable with the rate chart in the traffic log |
+
+**What you cannot see** (driver-private data that consumer devices do not expose): NIC temperature,
+rx/tx buffer occupancy, optical transceiver power. The page states this boundary up front — what we
+cannot read is declared, not faked with a `0`.
+
+The watched set defaults to physical NICs and can be edited by hand (virtual adapters / tunnels /
+loopback each have a class tag). Monitoring is independent of the traffic run: it keeps sampling
+when no run is active and after a run stops.
+
+### 7. Troubleshooting
 
 | Symptom | Where to look first |
 | --- | --- |
 | Failures keep climbing | Error codes on the **Run log** page: `CONNECT_FAILED` is usually network/port/certificate, `TIMEOUT` usually means the target is saturated or packets are dropped |
 | Rate plateaus | Gains beyond 8 workers are typically small; first make sure the test machine or the target is not the bottleneck |
+| Rate suddenly collapses / stalls | **NIC monitoring** tab: is the link down, did the negotiated speed drop (e.g. 1 Gbps → 100 Mbps), are there discard / error spikes |
 | UI seems unresponsive | Check the tray icon — the window may be minimized while the process is alive |
 | The app exited unexpectedly | The log file contains a panic record (guaranteed by the panic hook) |
 
@@ -233,10 +258,12 @@ Development workflow, quality gates and the release procedure live in [docs/deve
 
 ```text
 loadloom/
+├── crates/nicmon/                 # NIC counter collection (the only FFI isolation layer, Windows)
 ├── crates/loadloom-core/          # headless engine (library)
 │   ├── src/
 │   │   ├── lib.rs                # the only public entry point
 │   │   ├── engine.rs             # the engine itself
+│   │   ├── nic/                  # NIC analysis: pure verdicts + event stream
 │   │   └── contract.rs           # single source of truth for the contract
 │   ├── tests/                    # integration tests (outside the published artifact)
 │   │   ├── contract_wire.rs      # contract guard: parses bindings.ts field by field
@@ -250,7 +277,9 @@ loadloom/
 │   └── tauri.conf.json
 ├── src/                          # React frontend
 │   ├── components/LineChart.tsx  # hand-drawn Canvas chart (no third-party, no CDN)
+│   ├── components/NicPanel.tsx   # NIC monitoring page (utilization bars / chart / timeline)
 │   ├── hooks/useEngine.ts        # streaming subscription (seq dedup, no polling)
+│   ├── hooks/useNic.ts           # NIC streaming subscription (independent of a run)
 │   ├── bindings.ts               # mirrored IPC contract
 │   └── App.tsx
 ├── docs/                         # architecture, conventions, development

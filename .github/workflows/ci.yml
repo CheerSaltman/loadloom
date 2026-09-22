@@ -42,9 +42,11 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: clippy
-        run: cargo clippy --locked -p loadloom-core --all-targets -- -D warnings
+        run: cargo clippy --locked -p loadloom-core -p nicmon --all-targets -- -D warnings
       - name: test
         run: cargo test --locked -p loadloom-core
+      - name: 采集层测试（`nicmon` 不是 `loadloom-core` 的测试目标，必须单独指定）
+        run: cargo test --locked -p nicmon
 
   # 前端：类型检查 + 打包。
   web:

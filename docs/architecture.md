@@ -58,6 +58,7 @@ Tokio 会 panic。`OwnedRuntime` 把真正的释放动作挪到一条裸线程�
 | 高频指标（250 ms） | `tauri::ipc::Channel<MetricsSnapshot>` | 单向、可背压、不占事件循环 |
 | 低频事件（开始/停止/拒绝） | `app.emit("loadloom://run-event")` | 广播给多个监听者 |
 | 运行日志 | `app.emit("loadloom://log")` | 与落盘日志同源 |
+| 网卡指标（500 ms） | `tauri::ipc::Channel<NicSnapshot>` | 独立于打流的链路监测，打流停止后仍在继续 |
 
 前端不使用 `setInterval` 拉状态，界面上的实时数据全部来自推送。
 
@@ -99,12 +100,32 @@ release profile 因此保留 `panic = "unwind"` 与 `debug = "line-tables-only"`
 false），于是作为**额外的** worker 继续打流 —— 实际并发突破用户授权值，流量也继续
 打向一个已经叫停的目标。
 
+### 9. 网卡监测：FFI 关进独立 crate，分析保持纯函数
+
+网卡链路数据来自 Windows 的 `GetIfTable2`（`iphlpapi`），这是整个仓库里唯一需要
+`unsafe` 的地方。因此把它单独拆成 `crates/nicmon`：
+
+- `nicmon` 只做「取数 + 解析」：FFI、结构体布局、位域与错误码，对外导出与平台无关的
+  `RawAdapter`。工作区级 `unsafe_code = "forbid"` 保持不动，`nicmon` 自己声明
+  `deny`，并在唯一需要 `unsafe` 的模块顶部显式白名单 —— 新增 `unsafe` 无法悄悄溜进来；
+- `loadloom-core::nic` 只做「分析」：差值、利用率、链路跳变、丢弃 / 错误 / 队列积压
+  的起止判定，全部是不读时钟、不碰 IO 的纯函数，采集闭包由调用方注入；
+- 于是 Windows 真机取数与测试里的构造序列走的是**同一条判定路径**：链路瞬断、
+  计数器归零、尖峰收尾这些场景可以逐帧重放，不需要真拔网线；
+- 能力边界写进契约（`CAPABILITY_NOTE`）：温度、缓冲区占用率、光功率拿不到就不提供
+  字段，也不填 0。取不到的数据宁可没有，也不编一个看起来像真的。
+
+采样走独立的 500 ms 定时任务，与打流的 250 ms 指标流互不阻塞：停止打流后链路监测
+仍在继续 —— 恰恰是「停止瞬间的链路状态」这类证据最有价值。
+
 ## 目录约定
 
 ```
 loadloom/
-├── crates/loadloom-core/     # 无头引擎（库）
+├── crates/nicmon/           # 网卡计数器采集（唯一允许 FFI 的隔离层）
+├── crates/loadloom-core/    # 无头引擎（库）
 │   ├── src/
+│   │   └── nic/             # 网卡分析：纯函数判定与事件流
 │   ├── tests/               # 集成测试（contract_wire, headless_e2e）
 │   ├── benches/             # 基准（throughput）
 │   └── examples/            # 可运行示例（headless_smoke）

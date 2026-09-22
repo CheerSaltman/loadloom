@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/loadloom-core", "src-tauri"]
+members = ["crates/loadloom-core", "crates/nicmon", "src-tauri"]
 
 [workspace.package]
 version = "0.4.6"

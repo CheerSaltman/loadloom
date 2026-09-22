@@ -7,7 +7,7 @@
 | 包布局 `src/tests/benches/examples` | Cargo Book · Package Layout | `crates/loadloom-core/` 四分目录；基准不混进 `tests/` |
 | 清单元数据与工作区继承 | Cargo Book · Manifest / Workspaces | `[workspace.package]` + 各 crate 的 `xxx.workspace = true` |
 | 统一 lint 策略 | Cargo Book · `[lints]` | `[workspace.lints.rust/clippy]` + 成员 `[lints] workspace = true` |
-| 禁止 unsafe | Rust 参考 · `unsafe_code` lint | `[workspace.lints.rust] unsafe_code = "forbid"` |
+| 禁止 unsafe | Rust 参考 · `unsafe_code` lint | `[workspace.lints.rust] unsafe_code = "forbid"`；唯一例外 `crates/nicmon`（FFI 必需）：不继承工作区 lint，自声明 `deny` + 单模块白名单 |
 | 收窄无用公开项 | Rust 参考 · `unreachable_pub` lint | 开启为 `warn`，配合 CI 的 `-D warnings` 生效 |
 | 固定编译器 | rustup Book · Toolchain Overrides | `rust-toolchain.toml`（`stable` + rustfmt/clippy，`profile = "minimal"`） |
 | 格式化一致性 | rustfmt 配置文档 | `rustfmt.toml`，只用 stable 选项，CI 跑 `--check` |

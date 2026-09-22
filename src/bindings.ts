@@ -106,6 +106,101 @@ export type CoreError =
   | { alreadyRunning: string }
   | { internal: string };
 
+// ------------------------------ 网卡链路监测 ------------------------------
+
+/** 适配器类别。默认只监测 `physical`。 */
+export type NicAdapterClass = "physical" | "virtual" | "loopback" | "tunnel" | "other";
+
+/** 链路状态（由操作状态、连接状态与驱动标志位归并出的用户可见判断）。 */
+export type NicLinkState = "connected" | "disconnected" | "dormant" | "notPresent" | "unknown";
+
+/** 监测事件类别。尖峰类事件的收尾记录 `resolved` 为 true。 */
+export type NicEventKind =
+  | "linkUp"
+  | "linkDown"
+  | "speedChange"
+  | "counterReset"
+  | "discardSpike"
+  | "errorSpike"
+  | "queueBacklog"
+  | "adapterAdded"
+  | "adapterRemoved"
+  | "selection";
+
+/** 网卡实时曲线点（收 / 发速率与利用率百分比）。 */
+export interface NicSeriesPoint {
+  rxBps: number;
+  txBps: number;
+  rxUtilization: number;
+  txUtilization: number;
+}
+
+/** 单块网卡的历史序列（仅握手帧填充）。 */
+export interface NicAdapterHistory {
+  id: string;
+  points: NicSeriesPoint[];
+}
+
+/** 一块网卡的实时状态与累计读数。 */
+export interface NicAdapterDto {
+  id: string;
+  name: string;
+  description: string;
+  class: NicAdapterClass;
+  media: string;
+  mac: string;
+  mtu: number;
+  linkState: NicLinkState;
+  operStatus: string;
+  adminEnabled: boolean;
+  transmitSpeedBps: number;
+  receiveSpeedBps: number;
+  monitored: boolean;
+  selected: boolean;
+  rxBps: number;
+  txBps: number;
+  rxUtilization: number;
+  txUtilization: number;
+  outQueueLen: number;
+  queueBacklog: boolean;
+  rxDiscardsPerSec: number;
+  txDiscardsPerSec: number;
+  rxErrorsPerSec: number;
+  txErrorsPerSec: number;
+  rxBytesTotal: number;
+  txBytesTotal: number;
+  rxDiscardsTotal: number;
+  txDiscardsTotal: number;
+  rxErrorsTotal: number;
+  txErrorsTotal: number;
+  rxUnknownProtosTotal: number;
+}
+
+/** 监测事件 —— 与日志同源同码（`code` 即 `NIC-*`）。 */
+export interface NicEvent {
+  atMs: number;
+  adapterId: string;
+  adapter: string;
+  kind: NicEventKind;
+  code: string;
+  resolved: boolean;
+  message: string;
+}
+
+/** Command `get_nic_snapshot` 返回 / Event Channel 帧。 */
+export interface NicSnapshot {
+  seq: number;
+  supported: boolean;
+  note: string;
+  sampling: boolean;
+  sampleMs: number;
+  selection: string[];
+  adapters: NicAdapterDto[];
+  events: NicEvent[];
+  lastError: string;
+  history: NicAdapterHistory[];
+}
+
 /**
  * 前端异常上报载荷（Command `report_frontend_error` 入参）。
  *
@@ -158,6 +253,15 @@ export const commands = {
   /** 上报前端未捕获异常（后端落盘 + 生成崩溃报告）。 */
   reportFrontendError: (report: FrontendErrorReport) =>
     invoke<void>("report_frontend_error", { report }),
+  /** 全部接口（含虚拟 / 隧道），供网卡勾选面板使用。 */
+  listNicAdapters: () => invoke<NicAdapterDto[]>("list_nic_adapters"),
+  /** 网卡监测快照；`withHistory = true` 时附带每块网卡的曲线。 */
+  getNicSnapshot: (withHistory: boolean) =>
+    invoke<NicSnapshot>("get_nic_snapshot", { withHistory }),
+  /** 设置监测范围（空数组 = 默认监测全部物理网卡）。 */
+  setNicSelection: (ids: string[]) => invoke<void>("set_nic_selection", { ids }),
+  /** 生成可直接粘贴给维护者的网卡报告。 */
+  getNicReport: () => invoke<string>("get_nic_report"),
   quitApp: () => invoke<void>("quit_app"),
 
   /**
@@ -168,6 +272,13 @@ export const commands = {
     const channel = new Channel<MetricsSnapshot>();
     channel.onmessage = onFrame;
     return invoke<void>("subscribe_metrics", { channel });
+  },
+
+  /** 网卡监测推流订阅（后端每 500ms 推一帧）。 */
+  subscribeNic: (onFrame: (frame: NicSnapshot) => void) => {
+    const channel = new Channel<NicSnapshot>();
+    channel.onmessage = onFrame;
+    return invoke<void>("subscribe_nic", { channel });
   },
 };
 

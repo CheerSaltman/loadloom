@@ -12,7 +12,8 @@ use std::path::PathBuf;
 
 use loadloom_core::{
     CoreError, EngineLimits, ErrorCount, HistoryPoint, LiveConfigPatch, LogEntry, LogLevel,
-    MetricsSnapshot, RunEvent, RunEventKind, RunPhase, StartRunRequest,
+    MetricsSnapshot, NicAdapterClass, NicAdapterDto, NicAdapterHistory, NicEvent, NicEventKind,
+    NicLinkState, NicSeriesPoint, NicSnapshot, RunEvent, RunEventKind, RunPhase, StartRunRequest,
 };
 use serde::Serialize;
 
@@ -439,17 +440,224 @@ fn every_contract_type_is_covered_by_a_bindings_interface() {
         "MetricsSnapshot",
         "LogEntry",
         "RunEvent",
+        "NicSeriesPoint",
+        "NicAdapterHistory",
+        "NicAdapterDto",
+        "NicEvent",
+        "NicSnapshot",
     ] {
         assert!(
             source.contains(&format!("export interface {name}")),
             "bindings.ts 缺少 export interface {name}"
         );
     }
-    for name in ["RunPhase", "LogLevel", "RunEventKind"] {
+    for name in [
+        "RunPhase",
+        "LogLevel",
+        "RunEventKind",
+        "NicAdapterClass",
+        "NicLinkState",
+        "NicEventKind",
+    ] {
         assert!(
             source.contains(&format!("export type {name} =")),
             "bindings.ts 缺少 export type {name}"
         );
     }
     assert!(source.contains("export type CoreError ="));
+}
+
+// ---------------------------------------------------------------------------
+// 网卡监测
+// ---------------------------------------------------------------------------
+
+/// 一块「什么都在跑」的网卡：所有可选/实时字段都非零，否则键名比对会失去意义。
+fn sample_adapter() -> NicAdapterDto {
+    NicAdapterDto {
+        id: "luid-0000000000000001".into(),
+        name: "以太网".into(),
+        description: "Intel(R) Ethernet Controller I225-V".into(),
+        class: NicAdapterClass::Physical,
+        media: "以太网".into(),
+        mac: "AA-BB-CC-DD-EE-FF".into(),
+        mtu: 1500,
+        link_state: NicLinkState::Connected,
+        oper_status: "已启用".into(),
+        admin_enabled: true,
+        transmit_speed_bps: 1_000_000_000.0,
+        receive_speed_bps: 1_000_000_000.0,
+        monitored: true,
+        selected: true,
+        rx_bps: 1_048_576.0,
+        tx_bps: 2_097_152.0,
+        rx_utilization: 0.8,
+        tx_utilization: 1.6,
+        out_queue_len: 0,
+        queue_backlog: false,
+        rx_discards_per_sec: 0.0,
+        tx_discards_per_sec: 0.0,
+        rx_errors_per_sec: 0.0,
+        tx_errors_per_sec: 0.0,
+        rx_bytes_total: 4_000_000_000,
+        tx_bytes_total: 1_000_000_000,
+        rx_discards_total: 3,
+        tx_discards_total: 1,
+        rx_errors_total: 0,
+        tx_errors_total: 2,
+        rx_unknown_protos_total: 7,
+    }
+}
+
+#[test]
+fn nic_wire_frames_match_typescript() {
+    assert_aligned(
+        "NicSeriesPoint",
+        "NicSeriesPoint",
+        &NicSeriesPoint {
+            rx_bps: 1.0,
+            tx_bps: 2.0,
+            rx_utilization: 3.0,
+            tx_utilization: 4.0,
+        },
+    );
+
+    assert_aligned(
+        "NicAdapterHistory",
+        "NicAdapterHistory",
+        &NicAdapterHistory {
+            id: "luid-0000000000000001".into(),
+            points: vec![NicSeriesPoint {
+                rx_bps: 1.0,
+                tx_bps: 2.0,
+                rx_utilization: 3.0,
+                tx_utilization: 4.0,
+            }],
+        },
+    );
+
+    assert_aligned("NicAdapterDto", "NicAdapterDto", &sample_adapter());
+
+    assert_aligned(
+        "NicEvent",
+        "NicEvent",
+        &NicEvent {
+            at_ms: 1_500,
+            adapter_id: "luid-0000000000000001".into(),
+            adapter: "以太网".into(),
+            kind: NicEventKind::LinkDown,
+            code: "NIC-010".into(),
+            resolved: false,
+            message: "网卡「以太网」链路断开".into(),
+        },
+    );
+
+    assert_aligned(
+        "NicSnapshot",
+        "NicSnapshot",
+        &NicSnapshot {
+            seq: 1,
+            supported: true,
+            note: "可获得：……".into(),
+            sampling: true,
+            sample_ms: 500,
+            selection: vec!["luid-0000000000000001".into()],
+            adapters: vec![sample_adapter()],
+            events: vec![NicEvent {
+                at_ms: 1_500,
+                adapter_id: "luid-0000000000000001".into(),
+                adapter: "以太网".into(),
+                kind: NicEventKind::LinkUp,
+                code: "NIC-011".into(),
+                resolved: false,
+                message: "网卡「以太网」链路恢复".into(),
+            }],
+            last_error: String::new(),
+            history: vec![NicAdapterHistory {
+                id: "luid-0000000000000001".into(),
+                points: Vec::new(),
+            }],
+        },
+    );
+}
+
+#[test]
+fn nic_enums_match_typescript() {
+    for (rust, literal) in [
+        (NicAdapterClass::Physical, "physical"),
+        (NicAdapterClass::Virtual, "virtual"),
+        (NicAdapterClass::Loopback, "loopback"),
+        (NicAdapterClass::Tunnel, "tunnel"),
+        (NicAdapterClass::Other, "other"),
+    ] {
+        assert_eq!(wire_literal(&rust), literal);
+    }
+    assert_eq!(
+        ts_string_union("NicAdapterClass"),
+        [
+            NicAdapterClass::Physical,
+            NicAdapterClass::Virtual,
+            NicAdapterClass::Loopback,
+            NicAdapterClass::Tunnel,
+            NicAdapterClass::Other,
+        ]
+        .iter()
+        .map(wire_literal)
+        .collect::<BTreeSet<_>>()
+    );
+
+    for (rust, literal) in [
+        (NicLinkState::Connected, "connected"),
+        (NicLinkState::Disconnected, "disconnected"),
+        (NicLinkState::Dormant, "dormant"),
+        (NicLinkState::NotPresent, "notPresent"),
+        (NicLinkState::Unknown, "unknown"),
+    ] {
+        assert_eq!(wire_literal(&rust), literal);
+    }
+    assert_eq!(
+        ts_string_union("NicLinkState"),
+        [
+            NicLinkState::Connected,
+            NicLinkState::Disconnected,
+            NicLinkState::Dormant,
+            NicLinkState::NotPresent,
+            NicLinkState::Unknown,
+        ]
+        .iter()
+        .map(wire_literal)
+        .collect::<BTreeSet<_>>()
+    );
+
+    for (rust, literal) in [
+        (NicEventKind::LinkUp, "linkUp"),
+        (NicEventKind::LinkDown, "linkDown"),
+        (NicEventKind::SpeedChange, "speedChange"),
+        (NicEventKind::CounterReset, "counterReset"),
+        (NicEventKind::DiscardSpike, "discardSpike"),
+        (NicEventKind::ErrorSpike, "errorSpike"),
+        (NicEventKind::QueueBacklog, "queueBacklog"),
+        (NicEventKind::AdapterAdded, "adapterAdded"),
+        (NicEventKind::AdapterRemoved, "adapterRemoved"),
+        (NicEventKind::Selection, "selection"),
+    ] {
+        assert_eq!(wire_literal(&rust), literal);
+    }
+    assert_eq!(
+        ts_string_union("NicEventKind"),
+        [
+            NicEventKind::LinkUp,
+            NicEventKind::LinkDown,
+            NicEventKind::SpeedChange,
+            NicEventKind::CounterReset,
+            NicEventKind::DiscardSpike,
+            NicEventKind::ErrorSpike,
+            NicEventKind::QueueBacklog,
+            NicEventKind::AdapterAdded,
+            NicEventKind::AdapterRemoved,
+            NicEventKind::Selection,
+        ]
+        .iter()
+        .map(wire_literal)
+        .collect::<BTreeSet<_>>()
+    );
 }

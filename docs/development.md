@@ -26,8 +26,9 @@ npm run desktop:build                      # 打包：exe + NSIS + MSI
 ```bash
 npm run build                                                     # 桌面壳编译期需要 dist/ 存在
 cargo fmt --all --check                                           # 格式
-cargo clippy --locked -p loadloom-core --all-targets -- -D warnings
+cargo clippy --locked -p loadloom-core -p nicmon --all-targets -- -D warnings
 cargo test  --locked -p loadloom-core                             # 无头核心：单元 + 契约 + 端到端
+cargo test  --locked -p nicmon                                    # 采集层：分类 / 位域解析 / 计数器倒退（非 Windows 走降级后端）
 cargo run   --locked --example headless_smoke -p loadloom-core     # 示例可运行
 cargo test  --locked -p loadloom-desktop --lib                     # 桌面壳：日志格式与体积轮转
 npm run typecheck                                                 # 前端类型检查
@@ -41,6 +42,8 @@ npm run typecheck                                                 # 前端类型
 | 套件 | 覆盖什么 |
 | --- | --- |
 | `loadloom-core` 单元测试（`engine` / `rate` / `metrics`） | 信任边界校验（`NaN` 拒绝、速率与自动停止阈值收敛、上限可达性）、令牌桶原子镜像 / 容量 / 债务封顶 / 等待时长有界化、运行代次、退避抖动、饱和在途计数、缓存破坏参数、环形历史、成功率、错误分布排序与截断、RFC3550 抖动递推 |
+| `nicmon` 单元测试 | 适配器分类（Hyper-V / VMware / 回环 / 隧道 / 端点）、驱动标志优先于名字、宽字符串 NUL 截断与垃圾字节不 panic、负数枚举不被当成 4 亿、计数器倒退识别、链路在线的三信号判定 |
+| `loadloom-core` 的 `nic` 单元测试（`analysis` / `monitor`） | 速率与利用率换算、计数器归零不产生巨值、链路中断时长、协商速率变化、丢弃 / 错误 / 队列积压的起止与峰值、选择范围拒绝畸形载荷、采样失败不杀死监测、订阅建立前的日志补发、真机采样器自检 |
 | `contract_wire` | 解析 `src/bindings.ts` 逐字段比对 serde 实产 JSON |
 | `headless_e2e` | 本地伪 origin 跑真实打流，含「裸线程无 Tokio 运行时」启动、并发启动只放行一个、**「已停止的一代不得继续产生流量」的连接计数断言** |
 | `loadloom-desktop` 单元测试（`logging`） | UTC 时间戳与闰日换算、级别标签定宽、行格式、控制字符转义与超长截断（CWE-117）、两代体积轮转、启动归档超限旧日志、坏句柄降级不 panic |

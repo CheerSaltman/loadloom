@@ -1,0 +1,28 @@
+[package]
+name = "nicmon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "只读网卡计数器采集层：Windows GetIfTable2 计数器 + 跨平台可测的适配器分类。无 GUI、无驱动、无需管理员。"
+keywords = ["network", "monitoring", "windows", "throughput"]
+categories = ["network-programming", "os::windows-apis"]
+# 内部库，不发布到 crates.io。
+publish = false
+
+# 本 crate **刻意不继承**工作区 lint（`unsafe_code = "forbid"`）：读取网卡计数器的
+# 唯一途径是 Windows FFI，而 `forbid` 无法在内部被 `allow` 覆盖。这里改成 `deny`
+# —— 只允许 `windows` 模块顶部的一次放行，crate 内其它任何地方写 unsafe 都会
+# 直接编译失败，隔离范围比「全工作区随便写」小得多。
+[lints.rust]
+unsafe_code = "deny"
+
+[target.'cfg(windows)'.dependencies]
+# 版本与 Cargo.lock 中已有的传递依赖一致，不引入新的版本分支。
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+] }

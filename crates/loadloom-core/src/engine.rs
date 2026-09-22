@@ -308,7 +308,7 @@ impl Inner {
 /// * 构造时无运行时（裸线程）→ 自建专属多线程运行时。
 ///
 /// 两者都经 `Handle::spawn` 派发，而 `Handle::spawn` 明确允许跨线程调用。
-enum Executor {
+pub(crate) enum Executor {
     Ambient(tokio::runtime::Handle),
     Owned(OwnedRuntime),
 }
@@ -325,7 +325,7 @@ enum Executor {
 ///
 /// 这个坑在吞吐标定台上被真实踩到过（停止打流后每个并发档位都炸一次），所以把真正
 /// 的释放动作挪到一条裸线程上做。
-struct OwnedRuntime(Option<tokio::runtime::Runtime>);
+pub(crate) struct OwnedRuntime(Option<tokio::runtime::Runtime>);
 
 impl OwnedRuntime {
     fn get(&self) -> &tokio::runtime::Runtime {
@@ -345,7 +345,7 @@ impl Drop for OwnedRuntime {
 }
 
 impl Executor {
-    fn acquire() -> Self {
+    pub(crate) fn acquire() -> Self {
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => Executor::Ambient(handle),
             Err(_) => Executor::Owned(OwnedRuntime(Some(
@@ -362,7 +362,7 @@ impl Executor {
     ///
     /// 只接受无返回值的 future：引擎里的后台任务都是常驻循环或 fire-and-forget，
     /// 不允许调用方 `.await` 任务结果，避免把后台任务重新耦合回调用栈。
-    fn spawn<F>(&self, future: F)
+    pub(crate) fn spawn<F>(&self, future: F)
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {

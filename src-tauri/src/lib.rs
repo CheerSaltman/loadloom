@@ -16,7 +16,8 @@ use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use loadloom_core::{
-    CoreError, Engine, EngineLimits, LiveConfigPatch, MetricsSnapshot, StartRunRequest,
+    CoreError, Engine, EngineLimits, LiveConfigPatch, LogEntry, MetricsSnapshot, NicAdapterDto,
+    NicMonitor, NicSnapshot, StartRunRequest,
 };
 
 /// 日志流事件名。
@@ -27,6 +28,9 @@ pub const EVENT_RUN: &str = "loadloom://run-event";
 /// 应用状态：仅持有一个引擎句柄。
 pub struct AppState {
     pub engine: Arc<Engine>,
+    /// 网卡链路监测器。与引擎并列而非嵌套：它有自己的采样周期与订阅者，
+    /// 打流停不停都不影响它继续记录链路状态。
+    pub nic: Arc<NicMonitor>,
 }
 
 // ---------------------------------------------------------------------------
@@ -93,6 +97,54 @@ fn quit_app(app: AppHandle) {
     app.exit(0);
 }
 
+// ---------------------------------------------------------------------------
+// Commands（网卡监测）
+// ---------------------------------------------------------------------------
+
+/// 全部接口（含虚拟 / 隧道），供界面勾选监测范围。
+#[tauri::command]
+fn list_nic_adapters(state: State<'_, AppState>) -> Vec<NicAdapterDto> {
+    state.nic.adapters()
+}
+
+/// 网卡监测快照（`withHistory = true` 时附带每块网卡的曲线）。
+#[tauri::command]
+fn get_nic_snapshot(with_history: bool, state: State<'_, AppState>) -> NicSnapshot {
+    state.nic.snapshot(with_history)
+}
+
+/// 设置监测范围。空数组 = 默认（全部物理网卡）。
+/// 非法载荷（超长标识 / 数量超限）返回强类型错误，由前端统一提示。
+#[tauri::command]
+fn set_nic_selection(ids: Vec<String>, state: State<'_, AppState>) -> Result<(), CoreError> {
+    state.nic.select(ids)
+}
+
+/// 生成网卡报告（可直接粘贴给维护者），并留下一行 `NIC-007` 以便与日志对齐。
+#[tauri::command]
+fn get_nic_report(state: State<'_, AppState>) -> String {
+    state.nic.report()
+}
+
+/// 建立网卡监测推流通道：后端每 500ms 主动推一帧，前端零轮询。
+#[tauri::command]
+fn subscribe_nic(channel: Channel<NicSnapshot>, state: State<'_, AppState>) {
+    let mut receiver = state.nic.subscribe();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match receiver.recv().await {
+                Ok(frame) => {
+                    if channel.send(frame).is_err() {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
+        }
+    });
+}
+
 /// 返回**实际生效**的日志文件路径（供界面展示，便于用户自行排查）。
 ///
 /// 主目录不可写时日志会降级到临时目录，这里返回的就是降级后的那一个；
@@ -107,11 +159,17 @@ fn get_log_path() -> Option<String> {
 /// 前端「复制诊断信息 / 导出诊断」直接消费它：用户报障时只需要一份文本，
 /// 不必在日志目录里手动挑文件、拼现场。
 #[tauri::command]
-fn get_diagnostics(tail_lines: Option<u32>) -> String {
+fn get_diagnostics(tail_lines: Option<u32>, state: State<'_, AppState>) -> String {
     let tail = tail_lines
         .map(|value| value.clamp(50, 5_000) as usize)
         .unwrap_or(logging::DIAGNOSTICS_TAIL_LINES);
-    logging::diagnostics_text(tail)
+    // 网卡报告附在日志后面：吞吐异常时，「哪块网卡在什么时刻掉了多少包」与
+    // 日志尾部的时间轴是同一份证据，分成两次复制迟早会错位。
+    format!(
+        "{}\n{}",
+        logging::diagnostics_text(tail),
+        state.nic.report_text()
+    )
 }
 
 /// 前端未捕获异常的上报载荷。
@@ -162,26 +220,22 @@ pub fn run() {
             // 引擎自带执行器（见 loadloom_core::Executor），**无需**外层运行时上下文，
             // 因此在 setup 主线程里可以直接构造，不必再包一层 block_on。
             let engine = Engine::spawn();
+            // 网卡监测独立启动：它记录的是链路本身的状态，与是否正在打流无关。
+            // 打流前后的链路抖动同样是解释吞吐曲线的关键证据。
+            let nic = NicMonitor::spawn();
             app.manage(AppState {
                 engine: Arc::clone(&engine),
+                nic: Arc::clone(&nic),
             });
 
             // ---- 日志落盘 + panic 捕获 ----
             logging::init(app.handle().clone(), &engine);
 
             // ---- 日志 / 生命周期 -> 前端事件流（同时镜像到磁盘） ----
-            let log_handle: AppHandle = app.handle().clone();
-            let mut logs = engine.subscribe_logs();
-            tauri::async_runtime::spawn(async move {
-                while let Ok(entry) = logs.recv().await {
-                    // 事件码与来源一并落盘：磁盘日志与界面条目保持同一条记录，
-                    // 否则「界面看到的码」在文件里搜不到，排障时又要来回对照。
-                    logging::write_full(entry.level, &entry.code, &entry.source, &entry.message);
-                    // 上屏的那一份同样走编码：两条出口共用同一次编码，否则事件流
-                    // 就是绕过日志编码的后门（见 logging::encoded_entry）。
-                    let _ = log_handle.emit(EVENT_LOG, logging::encoded_entry(entry));
-                }
-            });
+            forward_logs(app.handle().clone(), engine.subscribe_logs());
+            // 网卡事件与打流日志走同一条前端事件流、同一份磁盘日志：两者必须在
+            // 同一时间轴上对照，否则「吞吐掉了」与「网卡正在丢包」永远对不上号。
+            forward_logs(app.handle().clone(), nic.subscribe_logs());
 
             let event_handle: AppHandle = app.handle().clone();
             let mut events = engine.subscribe_events();
@@ -238,6 +292,11 @@ pub fn run() {
             get_diagnostics,
             report_frontend_error,
             open_log_dir,
+            list_nic_adapters,
+            get_nic_snapshot,
+            set_nic_selection,
+            get_nic_report,
+            subscribe_nic,
             quit_app
         ])
         .run(tauri::generate_context!())
@@ -250,4 +309,21 @@ fn reveal(app: &AppHandle) {
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
+}
+
+/// 把后台日志流接到「落盘 + 前端事件」两条出口。
+///
+/// 打流引擎与网卡监测共用它：两条流各写一份转发逻辑，格式与编码迟早漂移，
+/// 而漂移的那一刻，两条时间轴就对不上了 —— 这恰恰是它们存在的唯一理由。
+fn forward_logs(handle: AppHandle, mut logs: tokio::sync::broadcast::Receiver<LogEntry>) {
+    tauri::async_runtime::spawn(async move {
+        while let Ok(entry) = logs.recv().await {
+            // 事件码与来源一并落盘：磁盘日志与界面条目保持同一条记录，
+            // 否则「界面看到的码」在文件里搜不到，排障时又要来回对照。
+            logging::write_full(entry.level, &entry.code, &entry.source, &entry.message);
+            // 上屏的那一份同样走编码：两条出口共用同一次编码，否则事件流
+            // 就是绕过日志编码的后门（见 logging::encoded_entry）。
+            let _ = handle.emit(EVENT_LOG, logging::encoded_entry(entry));
+        }
+    });
 }

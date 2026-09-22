@@ -15,7 +15,8 @@
 //! * [`sys`] —— 进程与基础设施（会话、panic、前端异常、HTTP 客户端降级）；
 //! * [`cfg`] —— 入参校验与收敛（信任边界上的每一次拒绝 / 改写）；
 //! * [`run`] —— 运行生命周期（开始 / 停止 / 自动停止 / 重复启动 / 参数快照）；
-//! * [`net`] —— 网络请求、响应流与重试。
+//! * [`net`] —— 网络请求、响应流与重试；
+//! * [`nic`] —— 网卡链路监测（链路通断、协商速率、丢弃 / 错误 / 队列积压）。
 
 /// 进程与基础设施。
 pub mod sys {
@@ -79,6 +80,50 @@ pub mod net {
     pub const BACKOFF: &str = "NET-004";
 }
 
+/// 网卡链路监测。
+///
+/// 这一域的日志有**双重用途**：既给用户看（「是不是网线松了」），也是打流结果的
+/// 证据链 —— 吞吐在某秒断崖式下跌时，同一条时间轴上必须有网卡侧的记录，否则
+/// 「是源站限速还是本地链路抖动」永远只能靠猜。因此链路与计数器的异常一律带码。
+pub mod nic {
+    /// 监测已启动（平台、采样周期、默认范围）。
+    pub const MONITOR_READY: &str = "NIC-001";
+    /// 采样失败（系统调用出错，按里程碑节流）。
+    pub const SAMPLE_FAILED: &str = "NIC-002";
+    /// 本平台不支持网卡计数器读取（明确降级，不假装没有网卡）。
+    pub const UNSUPPORTED: &str = "NIC-003";
+    /// 接口列表变化（新增 / 移除 / 拔出）。
+    pub const ADAPTERS_CHANGED: &str = "NIC-004";
+    /// 被勾选的适配器当前不在列表里（可能已拔出，插回后自动恢复监测）。
+    pub const SELECTION_UNKNOWN: &str = "NIC-005";
+    /// 监测范围已更新（如实记录这一刻选了哪些网卡）。
+    pub const SELECTION_APPLIED: &str = "NIC-006";
+    /// 网卡报告已生成（报告内容随日志一起可导出）。
+    pub const REPORT: &str = "NIC-007";
+    /// 首次采样发现清单（哪些接口被看见、默认监测了哪几块）。
+    pub const DISCOVERED: &str = "NIC-008";
+    /// 链路断开。
+    pub const LINK_DOWN: &str = "NIC-010";
+    /// 链路恢复（附中断时长）。
+    pub const LINK_UP: &str = "NIC-011";
+    /// 协商速率变化（换网线 / 换端口 / 无线降速 / 省电降频）。
+    pub const SPEED_CHANGED: &str = "NIC-012";
+    /// 累计计数器被清零（网卡重插 / 驱动重载）：速率换算必须先归零再统计。
+    pub const COUNTER_RESET: &str = "NIC-013";
+    /// 丢弃尖峰开始（收 / 发丢弃持续高于阈值）。
+    pub const DISCARD_SPIKE: &str = "NIC-020";
+    /// 丢弃尖峰结束（附峰值与持续时长）。
+    pub const DISCARD_SPIKE_END: &str = "NIC-021";
+    /// 错误尖峰开始。
+    pub const ERROR_SPIKE: &str = "NIC-022";
+    /// 错误尖峰结束（附峰值与持续时长）。
+    pub const ERROR_SPIKE_END: &str = "NIC-023";
+    /// 发送队列开始积压（驱动来不及把包发出去）。
+    pub const QUEUE_BACKLOG: &str = "NIC-024";
+    /// 发送队列积压结束（附峰值与持续时长）。
+    pub const QUEUE_BACKLOG_END: &str = "NIC-025";
+}
+
 /// 全部事件码，供契约测试与诊断导出使用。
 pub const ALL: &[&str] = &[
     sys::SESSION_START,
@@ -104,6 +149,24 @@ pub const ALL: &[&str] = &[
     net::REQUEST_FAILED,
     net::STREAM_BROKEN,
     net::BACKOFF,
+    nic::MONITOR_READY,
+    nic::SAMPLE_FAILED,
+    nic::UNSUPPORTED,
+    nic::ADAPTERS_CHANGED,
+    nic::SELECTION_UNKNOWN,
+    nic::SELECTION_APPLIED,
+    nic::REPORT,
+    nic::DISCOVERED,
+    nic::LINK_DOWN,
+    nic::LINK_UP,
+    nic::SPEED_CHANGED,
+    nic::COUNTER_RESET,
+    nic::DISCARD_SPIKE,
+    nic::DISCARD_SPIKE_END,
+    nic::ERROR_SPIKE,
+    nic::ERROR_SPIKE_END,
+    nic::QUEUE_BACKLOG,
+    nic::QUEUE_BACKLOG_END,
 ];
 
 /// 高频重复日志的「突发配额」：同一类别的前 N 条完整保留。
